@@ -8,7 +8,7 @@ The card left one hand and arrived whole in the other, or it did not happen. No 
 
 Atomic Barter is that gesture, rebuilt onchain: intermediary-free, asset-to-asset exchange with no price denomination. A swap with no number in the middle. Either both sides move together or nothing does. It redesigns the trade from scratch, the way the playground already had it, before money taught us to put a figure on everything.
 
-# Atomic Barter
+## Atomic Barter
 
 **Trustless peer-to-peer swaps for NFTs and ERC-20 tokens on Ethereum. (Yes it can also allow for ERC20)**
 
