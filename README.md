@@ -105,7 +105,7 @@ Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type
 | Hardhat project scaffold | Configured |
 | React frontend shell | UI base components |
 | Wallet & contract integration | In Progress |
-| Dedicated contract tests | includes default Hardhat Lock boilerplate |
+| Dedicated contract tests | includes default Hardhat Lock boilerplate and escrow test|
 
 This repository demonstrates the **contract-first** foundation of a P2P barter dApp. The frontend is set up for rapid iteration once wallet and ABI wiring are added.
 
