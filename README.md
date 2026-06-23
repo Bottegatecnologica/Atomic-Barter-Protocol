@@ -103,9 +103,9 @@ Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type
 |-----------|--------|
 | `TradeEscrow` smart contract | Core logic implemented |
 | Hardhat project scaffold | Configured |
-| React frontend shell | UI components started (`TradeInterface` scaffold) |
-| Wallet & contract integration | Planned |
-| Dedicated contract tests | Planned (repo still includes default Hardhat Lock boilerplate) |
+| React frontend shell | UI base components |
+| Wallet & contract integration | In Progress |
+| Dedicated contract tests | includes default Hardhat Lock boilerplate |
 
 This repository demonstrates the **contract-first** foundation of a P2P barter dApp. The frontend is set up for rapid iteration once wallet and ABI wiring are added.
 
