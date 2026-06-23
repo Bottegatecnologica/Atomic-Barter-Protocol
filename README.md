@@ -1,4 +1,5 @@
 #Introduction
+
 Before any of us had money, we traded Pokémon cards. No prices, no order book. Just two kids and a phrase that held an entire economy: got it, got it, need it.
 
 Two things were happening in that trade, and each became a protocol.
