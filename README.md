@@ -1,6 +1,15 @@
+#Introduction
+Before any of us had money, we traded Pokémon cards. No prices, no order book. Just two kids and a phrase that held an entire economy: got it, got it, need it.
+
+Two things were happening in that trade, and each became a protocol.
+
+The card left one hand and arrived whole in the other, or it did not happen. No money in the middle, no agreed number, no clearing house. Just your card(/s) for my card(/s), both moving at once. You could not transfer half a Charizard, and neither of us had to admit what it was "worth."
+
+Atomic Barter is that gesture, rebuilt onchain: intermediary-free, asset-to-asset exchange with no price denomination. A swap with no number in the middle. Either both sides move together or nothing does. It redesigns the trade from scratch, the way the playground already had it, before money taught us to put a figure on everything.
+
 # Atomic Barter
 
-**Trustless peer-to-peer swaps for NFTs and ERC-20 tokens on Ethereum.**
+**Trustless peer-to-peer swaps for NFTs and ERC-20 tokens on Ethereum. (Yes it can also allow for ERC20)**
 
 Atomic Barter is a decentralized trading application that lets two parties exchange digital assets atomically — either both sides receive what they agreed on, or nothing moves. An on-chain escrow smart contract coordinates the trade, while a React frontend provides a wallet-connected interface for proposing, reviewing, and approving swaps.
 
