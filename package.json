@@ -1,0 +1,7 @@
+{
+  "name": "barter",
+  "version": "1.0.0",
+  "description": "Barter app",
+  "main": "index.js",
+  "license": "MIT"
+}
