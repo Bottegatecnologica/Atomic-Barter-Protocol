@@ -20,6 +20,12 @@ coverage.json
 # Hardhat Ignition — generated deployment records (keep modules/)
 ignition/deployments/
 
+# Foundry
+out/
+cache_forge/
+broadcast/
+lib/
+
 # Frontend (Vite)
 frontend/dist/
 frontend/dist-ssr/

@@ -41,10 +41,14 @@ The project is split into two layers:
 
 ### Safety & standards
 
-- Built on **OpenZeppelin** (`IERC721`, `IERC20`, `ReentrancyGuard`).
-- Pre-transfer checks for **ownership**, **allowance**, and **NFT approval for all**.
-- **Reentrancy protection** on trade execution.
+- Built on **OpenZeppelin** (`IERC721`, `IERC20`, `SafeERC20`, `ReentrancyGuard`).
+- ERC-20 pulls use `safeTransferFrom`. A `false` return reverts the whole trade. The recipient balance must increase by the exact amount, so a fee-on-transfer token cannot settle short.
+- Pre-transfer checks for **ownership**, **allowance** (including amounts already listed), and **NFT approval for all**.
+- Each party can list at most 20 assets and can remove one before settlement.
+- **Reentrancy protection** on every state-changing call. The trade is marked executed before any transfer.
 - Approvals reset automatically when either side changes their offered assets.
+
+The bugs this replaced, and how each one was exploited, are written up in [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -78,11 +82,11 @@ struct Trade {
     address counterparty;
     bool initiatorApproved;
     bool counterpartyApproved;
-    mapping(address => AssetList) assets;  // per-party asset lists
+    bool executed;
 }
 ```
 
-Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type (`ERC721` | `ERC20`).
+Each party's assets live in a separate array, not inside `Trade`. Solidity does not clear a nested mapping on `delete`, and cancel has to drop the bundles. Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type (`ERC721` | `ERC20`).
 
 ---
 
@@ -93,7 +97,7 @@ Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type
 | Smart contracts | Solidity 0.8.x, Hardhat, OpenZeppelin |
 | Frontend | React 19, TypeScript, Vite |
 | Styling | Tailwind CSS, shadcn/ui, Radix UI, Lucide icons |
-| Tooling | ESLint, Yarn |
+| Tooling | ESLint, npm, Hardhat, Foundry |
 
 ---
 
@@ -101,11 +105,12 @@ Each `Asset` records contract address, token ID (NFT), amount (ERC-20), and type
 
 | Component | Status |
 |-----------|--------|
-| `TradeEscrow` smart contract | Core logic implemented |
-| Hardhat project scaffold | Configured |
+| `TradeEscrow` smart contract | Core logic implemented, settlement hardened |
+| Hardhat tests | Cover settlement, non-standard ERC-20s, and the reentrancy case |
+| Foundry fuzz / invariant tests | All-or-nothing swap, escrow never custodies tokens |
 | React frontend shell | UI base components |
-| Wallet & contract integration | In Progress |
-| Dedicated contract tests | includes full escrow test|
+| Wallet & contract integration | In progress |
+| Verified deployment | Not published yet |
 
 This repository demonstrates the **contract-first** foundation of a P2P barter dApp. The frontend is set up for rapid iteration once wallet and ABI wiring are added.
 
@@ -115,7 +120,9 @@ This repository demonstrates the **contract-first** foundation of a P2P barter d
 
 - **Escrow over direct swap loops** — A single contract holds trade state and orchestrates transfers, keeping the UX linear (create → add → approve) instead of requiring users to craft complex multicall transactions.
 - **Approval reset on asset change** — Prevents a party from approving an offer and silently having the counterparty swap in different assets afterward.
-- **No custody before execution** — Assets remain in user wallets until execution; the contract uses standard `transferFrom` after allowances are set, avoiding unnecessary pre-deposits.
+- **No custody before execution** — Assets remain in user wallets until execution. The contract pulls them with `safeTransferFrom` only after both allowances are set.
+- **Exact delivery** — An ERC-20 leg is accepted only when the recipient's balance increases by the listed amount. Short payments revert the entire swap.
+- **Bounded, editable bundles** — A party can remove a listed asset. Neither side can grow the execution loop past 20 items.
 
 ---
 
@@ -124,16 +131,19 @@ This repository demonstrates the **contract-first** foundation of a P2P barter d
 ```
 Atomic Barter/
 ├── contracts/
-│   └── escrow-contract.sol    # TradeEscrow — main escrow logic
+│   ├── TradeEscrow.sol        # TradeEscrow — main escrow logic
+│   └── mocks/Mocks.sol        # Tokens used by the tests
 ├── frontend/
 │   └── src/
 │       ├── App.tsx
 │       └── components/
 │           ├── trade-interface.tsx
 │           └── ui/
-├── ignition/                  # Hardhat Ignition deploy modules
-├── test/                      # Hardhat tests
+├── ignition/modules/TradeEscrow.ts
+├── test/                      # Hardhat tests and Foundry fuzz tests
 ├── hardhat.config.ts
+├── foundry.toml
+├── SECURITY.md                # Self-review of the issues fixed in TradeEscrow
 └── README.md
 ```
 
@@ -142,9 +152,9 @@ Atomic Barter/
 ## Future Work
 
 - Wire frontend to `TradeEscrow` via ethers/viem and a wallet provider (e.g. MetaMask, WalletConnect).
-- Replace Lock boilerplate with `TradeEscrow` deployment and integration tests.
+- Publish a verified testnet deployment and record the address in Deployments.
 - Trade discovery: share `tradeId` via link or QR.
-- Optional: support ERC-1155, fee routing, or L2 deployment profiles.
+- Optional: support ERC-1155 or an L2 deployment profile. Fee-on-transfer tokens stay unsupported.
 
 ---
 
@@ -153,22 +163,22 @@ Atomic Barter/
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 18+
-- [Yarn](https://yarnpkg.com/)
-- A local Ethereum node or testnet RPC (for deployment and testing)
+- A local Ethereum node or testnet RPC (for deployment)
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) if you want the fuzz tests
 
 ### Install dependencies
 
 From the repository root:
 
 ```shell
-yarn install
+npm install
 ```
 
 For the frontend:
 
 ```shell
 cd frontend
-yarn install
+npm install
 ```
 
 ### Smart contracts
@@ -192,11 +202,26 @@ Start a local Hardhat node:
 npx hardhat node
 ```
 
-Deploy with Hardhat Ignition (update the module to target `TradeEscrow` when ready):
+Fuzz tests (Foundry). Install `forge-std` once, from the repository root:
 
 ```shell
-npx hardhat ignition deploy ./ignition/modules/Lock.ts --network localhost
+forge install foundry-rs/forge-std
+forge test
 ```
+
+Deploy with Hardhat Ignition:
+
+```shell
+npx hardhat ignition deploy ./ignition/modules/TradeEscrow.ts --network localhost
+```
+
+### Deployments
+
+No contract address in this repository is verified on an explorer yet. After a public deployment, add it here.
+
+| Network | Contract | Address | Explorer |
+|---------|----------|---------|----------|
+| — | TradeEscrow | Not deployed | — |
 
 ### Frontend
 
@@ -204,22 +229,22 @@ Development server with hot reload:
 
 ```shell
 cd frontend
-yarn dev
+npm run dev
 ```
 
 Production build:
 
 ```shell
 cd frontend
-yarn build
-yarn preview
+npm run build
+npm run preview
 ```
 
 Lint:
 
 ```shell
 cd frontend
-yarn lint
+npm run lint
 ```
 
 ### Hardhat CLI

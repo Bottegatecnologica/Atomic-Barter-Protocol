@@ -1,7 +1,20 @@
 {
-  "name": "barter",
+  "name": "atomic-barter",
   "version": "1.0.0",
-  "description": "Barter app",
-  "main": "index.js",
-  "license": "MIT"
+  "private": true,
+  "description": "Trustless peer-to-peer swaps for NFTs and ERC-20 tokens on Ethereum",
+  "license": "MIT",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:fuzz": "forge test",
+    "node": "hardhat node"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.4.0",
+    "hardhat": "^2.26.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
 }
