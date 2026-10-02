@@ -111,11 +111,11 @@ Each party's assets live in a separate array, not inside `Trade`. Solidity does 
 | `TradeEscrow` smart contract | Core logic implemented, settlement hardened |
 | Hardhat tests | Cover settlement, non-standard ERC-20s, and the reentrancy case |
 | Foundry fuzz / invariant tests | All-or-nothing swap, escrow never custodies tokens |
-| React frontend shell | UI base components |
-| Wallet & contract integration | In progress |
+| React trade screen | Calls the current contract, warns on unknown tokens, rebuilds settled bundles from events |
+| Wallet & contract integration | Wallet connect, create, add, approve, and cancel |
 | Verified deployment | Not published yet |
 
-This repository demonstrates the **contract-first** foundation of a P2P barter dApp. The frontend is set up for rapid iteration once wallet and ABI wiring are added.
+The trade screen calls `createTrade(counterparty, deadline)` and `approveTrade(tradeId, version)`. A contract that is not on the local allowlist has to be explicitly accepted before it can be listed. After settlement the screen rebuilds the bundle from `AssetAdded` and `AssetRemoved`, because the contract deletes those arrays.
 
 ---
 

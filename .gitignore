@@ -24,7 +24,7 @@ ignition/deployments/
 out/
 cache_forge/
 broadcast/
-lib/
+/lib/
 
 # Frontend (Vite)
 frontend/dist/

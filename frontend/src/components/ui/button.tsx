@@ -10,11 +10,11 @@ const Button = ({
   className = '', 
   ...props 
 }: ButtonProps) => {
-  const baseStyle = "inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors"
+  const baseStyle = "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40"
   const variants = {
-    default: "bg-blue-500 text-white hover:bg-blue-600",
-    outline: "border border-blue-500 text-blue-500 hover:bg-blue-50",
-    ghost: "hover:bg-gray-100"
+    default: "bg-amber-400 text-zinc-950 hover:bg-amber-300",
+    outline: "border border-white/15 bg-white/5 text-zinc-100 hover:bg-white/10",
+    ghost: "text-zinc-400 hover:bg-white/5 hover:text-zinc-100"
   }
 
   return (
