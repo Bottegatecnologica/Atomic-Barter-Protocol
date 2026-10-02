@@ -45,8 +45,9 @@ The project is split into two layers:
 - ERC-20 pulls use `safeTransferFrom`. A `false` return reverts the whole trade. The recipient balance must increase by the exact amount, so a fee-on-transfer token cannot settle short.
 - Pre-transfer checks for **ownership**, **allowance** (including amounts already listed), and **NFT approval for all**.
 - Each party can list at most 20 assets and can remove one before settlement.
-- **Reentrancy protection** on every state-changing call. The trade is marked executed before any transfer.
-- Approvals reset automatically when either side changes their offered assets.
+- **Reentrancy protection** on settlement and on bundle edits. The trade is marked executed before any transfer.
+- An approval names the bundle version the caller reviewed. Editing the bundle increments that version, so a transaction already in the mempool cannot settle the new offer.
+- Each trade has a deadline. After it, the bundle can no longer change or be approved. Either party can still cancel.
 
 The bugs this replaced, and how each one was exploited, are written up in [SECURITY.md](SECURITY.md).
 
@@ -68,11 +69,11 @@ The bugs this replaced, and how each one was exploited, are written up in [SECUR
 
 ### Trade lifecycle
 
-1. **Create** — Initiator calls `createTrade(counterparty)` and receives a unique `tradeId`.
-2. **Fund (off-chain approval)** — Each party adds assets via `addNFT` or `addERC20`. Tokens must be approved to the escrow; NFTs require `setApprovalForAll`.
-3. **Review** — Both parties inspect the full bundle on-chain (and in the UI).
-4. **Approve** — Each party calls `approveTrade(tradeId)`. When the second approval arrives, `_executeTrade` runs automatically.
-5. **Complete or cancel** — On success, assets are swapped; either party can still call `cancelTrade` while the trade is open.
+1. **Create** — Initiator calls `createTrade(counterparty, deadline)` and receives a unique `tradeId`.
+2. **Fund (off-chain approval)** — Each party adds assets via `addNFT` or `addERC20`. Tokens must be approved to the escrow. NFTs require `setApprovalForAll`; a one-token `approve` is not enough to list.
+3. **Review** — Both parties inspect the full bundle on-chain (and in the UI), including the token contracts and the counterparty address. Read `version` from `getTrade`.
+4. **Approve** — Each party calls `approveTrade(tradeId, version)` with the version they reviewed. When the second approval of that same version arrives, `_executeTrade` runs automatically.
+5. **Complete or cancel** — On success, assets are swapped. Either party can call `cancelTrade` while the trade is open, including after the deadline.
 
 ### Smart contract model
 
@@ -83,6 +84,8 @@ struct Trade {
     bool initiatorApproved;
     bool counterpartyApproved;
     bool executed;
+    uint256 deadline;
+    uint256 version;
 }
 ```
 
@@ -119,7 +122,9 @@ This repository demonstrates the **contract-first** foundation of a P2P barter d
 ## Design Decisions
 
 - **Escrow over direct swap loops** — A single contract holds trade state and orchestrates transfers, keeping the UX linear (create → add → approve) instead of requiring users to craft complex multicall transactions.
-- **Approval reset on asset change** — Prevents a party from approving an offer and silently having the counterparty swap in different assets afterward.
+- **Approval is bound to a bundle version** — `approveTrade` takes the version the caller reviewed. Any add or remove increments it and clears both approvals, so a pending transaction cannot settle a bundle it did not sign.
+- **A deadline on every trade** — The initiator sets when the offer stops being approvable. A forgotten approval cannot be settled months later.
+- **The contract cannot vet token contracts** — `ownerOf` and `balanceOf` are whatever the token says. A hostile token can lie and still pass the checks. The interface that lists a trade has to warn on unknown contracts, or restrict them to an allowlist. Settlement also uses ERC-721 `transferFrom`, which will deliver an NFT to a contract that does not know how to hold one. Review the counterparty before approving.
 - **No custody before execution** — Assets remain in user wallets until execution. The contract pulls them with `safeTransferFrom` only after both allowances are set.
 - **Exact delivery** — An ERC-20 leg is accepted only when the recipient's balance increases by the listed amount. Short payments revert the entire swap.
 - **Bounded, editable bundles** — A party can remove a listed asset. Neither side can grow the execution loop past 20 items.

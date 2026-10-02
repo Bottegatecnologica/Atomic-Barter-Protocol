@@ -1,4 +1,4 @@
-﻿import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+﻿import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
 
@@ -19,6 +19,10 @@ async function deployFixture() {
   return { escrow, token, nft, alice, bob, carol, aliceTokens, bobTokens };
 }
 
+async function openDeadline() {
+  return (await time.latest()) + 7 * 24 * 60 * 60;
+}
+
 async function approveStandardAssets({
   escrow,
   token,
@@ -31,6 +35,10 @@ async function approveStandardAssets({
   await token.connect(bob).approve(escrowAddress, hre.ethers.MaxUint256);
   await nft.connect(alice).setApprovalForAll(escrowAddress, true);
   await nft.connect(bob).setApprovalForAll(escrowAddress, true);
+}
+
+async function bundleVersion(escrow: { getTrade: (id: string) => Promise<{ version: bigint }> }, tradeId: string) {
+  return (await escrow.getTrade(tradeId)).version;
 }
 
 async function readTradeId(escrow: any, tx: any): Promise<string> {
@@ -51,7 +59,7 @@ describe("TradeEscrow", function () {
     it("opens a trade between two distinct parties", async function () {
       const { escrow, alice, bob } = await loadFixture(deployFixture);
 
-      const tx = await escrow.connect(alice).createTrade(bob.address);
+      const tx = await escrow.connect(alice).createTrade(bob.address, await openDeadline());
       await expect(tx).to.emit(escrow, "TradeCreated");
       const tradeId = await readTradeId(escrow, tx);
 
@@ -66,9 +74,9 @@ describe("TradeEscrow", function () {
     it("rejects a missing counterparty and a self-trade", async function () {
       const { escrow, alice } = await loadFixture(deployFixture);
 
-      await expect(escrow.connect(alice).createTrade(hre.ethers.ZeroAddress))
+      await expect(escrow.connect(alice).createTrade(hre.ethers.ZeroAddress, await openDeadline()))
         .to.be.revertedWithCustomError(escrow, "InvalidCounterparty");
-      await expect(escrow.connect(alice).createTrade(alice.address))
+      await expect(escrow.connect(alice).createTrade(alice.address, await openDeadline()))
         .to.be.revertedWithCustomError(escrow, "SelfTrade");
     });
   });
@@ -77,7 +85,7 @@ describe("TradeEscrow", function () {
     it("requires ownership, approval, and a positive funded balance", async function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, token, nft, alice, bob, carol } = ctx;
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
 
       await expect(escrow.connect(carol).addNFT(tradeId, await nft.getAddress(), 1))
         .to.be.revertedWithCustomError(escrow, "NotParticipant");
@@ -97,7 +105,7 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, token, nft, alice, bob } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       const tokenAddress = await token.getAddress();
       const nftAddress = await nft.getAddress();
 
@@ -116,7 +124,7 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, nft, alice, bob } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       const nftAddress = await nft.getAddress();
       const max = Number(await escrow.MAX_ASSETS_PER_PARTY());
 
@@ -129,7 +137,7 @@ describe("TradeEscrow", function () {
       await expect(escrow.connect(alice).addNFT(tradeId, nftAddress, 10 + max))
         .to.be.revertedWithCustomError(escrow, "TooManyAssets");
 
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
       expect((await escrow.getTrade(tradeId)).initiatorApproved).to.equal(true);
 
       await expect(escrow.connect(alice).removeAsset(tradeId, max))
@@ -150,11 +158,11 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, token, nft, alice, bob } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
 
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
       await escrow.connect(bob).addERC20(tradeId, await token.getAddress(), 1);
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
       await escrow.connect(bob).addERC20(tradeId, await token.getAddress(), 1);
 
       const trade = await escrow.getTrade(tradeId);
@@ -168,7 +176,7 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, token, nft, alice, bob, aliceTokens, bobTokens } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       const tokenAddress = await token.getAddress();
       const nftAddress = await nft.getAddress();
       const alicePays = hre.ethers.parseEther("100");
@@ -179,11 +187,11 @@ describe("TradeEscrow", function () {
       await escrow.connect(bob).addNFT(tradeId, nftAddress, 2);
       await escrow.connect(bob).addERC20(tradeId, tokenAddress, bobPays);
 
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
       expect((await escrow.getTrade(tradeId)).executed).to.equal(false);
       expect(await nft.ownerOf(1)).to.equal(alice.address);
 
-      await expect(escrow.connect(bob).approveTrade(tradeId))
+      await expect(escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId)))
         .to.emit(escrow, "TradeCompleted")
         .withArgs(tradeId);
 
@@ -202,11 +210,11 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, nft, alice, bob } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
 
-      await expect(escrow.connect(bob).approveTrade(tradeId))
+      await expect(escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId)))
         .to.be.revertedWithCustomError(escrow, "EmptyOffer")
         .withArgs(bob.address);
       expect(await nft.ownerOf(1)).to.equal(alice.address);
@@ -216,7 +224,7 @@ describe("TradeEscrow", function () {
       const ctx = await loadFixture(deployFixture);
       const { escrow, nft, alice, bob } = ctx;
       await approveStandardAssets(ctx);
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
 
       await expect(escrow.connect(bob).cancelTrade(tradeId))
@@ -237,13 +245,13 @@ describe("TradeEscrow", function () {
       await bad.connect(bob).approve(await escrow.getAddress(), payment);
       await nft.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
 
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
       await escrow.connect(bob).addERC20(tradeId, await bad.getAddress(), payment);
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
 
       // Bob's token reports failure instead of reverting. The NFT leg must roll back with it.
-      await expect(escrow.connect(bob).approveTrade(tradeId))
+      await expect(escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId)))
         .to.be.revertedWithCustomError(escrow, "SafeERC20FailedOperation")
         .withArgs(await bad.getAddress());
 
@@ -262,12 +270,12 @@ describe("TradeEscrow", function () {
       await feeToken.connect(bob).approve(await escrow.getAddress(), payment);
       await nft.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
 
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
       await escrow.connect(bob).addERC20(tradeId, await feeToken.getAddress(), payment);
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
 
-      await expect(escrow.connect(bob).approveTrade(tradeId))
+      await expect(escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId)))
         .to.be.revertedWithCustomError(escrow, "FeeOnTransferNotSupported");
 
       expect(await nft.ownerOf(1)).to.equal(alice.address);
@@ -286,12 +294,12 @@ describe("TradeEscrow", function () {
       await usdt.connect(alice).approve(await escrow.getAddress(), payment);
       await usdt.connect(bob).approve(await escrow.getAddress(), ask);
 
-      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address));
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
       const usdtAddress = await usdt.getAddress();
       await escrow.connect(alice).addERC20(tradeId, usdtAddress, payment);
       await escrow.connect(bob).addERC20(tradeId, usdtAddress, ask);
-      await escrow.connect(alice).approveTrade(tradeId);
-      await escrow.connect(bob).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
+      await escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
 
       expect(await usdt.balanceOf(alice.address)).to.equal(ask);
       expect(await usdt.balanceOf(bob.address)).to.equal(payment);
@@ -313,21 +321,76 @@ describe("TradeEscrow", function () {
 
       const tradeId = await readTradeId(
         escrow,
-        await escrow.connect(alice).createTrade(await party.getAddress())
+        await escrow.connect(alice).createTrade(await party.getAddress(), await openDeadline())
       );
       await party.track(escrowAddress, tradeId, tokenAddress);
       await party.approveToken(tokenAddress, escrowAddress, payment);
       await party.addERC20(tradeId, tokenAddress, payment);
       await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
-      await escrow.connect(alice).approveTrade(tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
       await token.arm();
-      await party.approveTrade(tradeId);
+      await party.approveTrade(tradeId, await bundleVersion(escrow, tradeId));
 
       expect(await party.cancelled()).to.equal(false);
       expect(await nft.ownerOf(1)).to.equal(await party.getAddress());
       expect(await token.balanceOf(alice.address)).to.equal(payment);
       expect(await token.balanceOf(await party.getAddress())).to.equal(0);
       expect((await escrow.getTrade(tradeId)).executed).to.equal(true);
+    });
+  });
+
+  describe("bundle binding", function () {
+    it("does not settle a bundle Bob has not approved", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { escrow, token, nft, alice, bob } = ctx;
+      await approveStandardAssets(ctx);
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(alice).createTrade(bob.address, await openDeadline())
+      );
+      const nftAddress = await nft.getAddress();
+      const tokenAddress = await token.getAddress();
+
+      await escrow.connect(alice).addNFT(tradeId, nftAddress, 1);
+      await escrow.connect(bob).addERC20(tradeId, tokenAddress, 1_000n);
+      const seen = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, seen);
+
+      await escrow.connect(alice).removeAsset(tradeId, 0);
+      await escrow.connect(alice).addERC20(tradeId, tokenAddress, 1n);
+      const rewritten = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, rewritten);
+
+      await expect(escrow.connect(bob).approveTrade(tradeId, seen))
+        .to.be.revertedWithCustomError(escrow, "StaleBundle")
+        .withArgs(rewritten);
+      expect(await nft.ownerOf(1)).to.equal(alice.address);
+      expect((await escrow.getTrade(tradeId)).executed).to.equal(false);
+    });
+
+    it("stops new approvals after the deadline and still allows cancel", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { escrow, nft, alice, bob } = ctx;
+      await approveStandardAssets(ctx);
+      const deadline = (await time.latest()) + 100;
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(alice).createTrade(bob.address, deadline)
+      );
+      await escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1);
+
+      await time.increaseTo(deadline + 1);
+      await expect(
+        escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId))
+      ).to.be.revertedWithCustomError(escrow, "TradeExpired");
+      await expect(escrow.connect(bob).cancelTrade(tradeId)).to.emit(escrow, "TradeCancelled");
+    });
+
+    it("rejects a deadline that is not in the future", async function () {
+      const { escrow, alice, bob } = await loadFixture(deployFixture);
+      const now = await time.latest();
+      await expect(escrow.connect(alice).createTrade(bob.address, now))
+        .to.be.revertedWithCustomError(escrow, "InvalidDeadline");
     });
   });
 });

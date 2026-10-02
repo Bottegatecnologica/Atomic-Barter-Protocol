@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {TradeEscrow} from "../contracts/TradeEscrow.sol";
@@ -34,22 +34,23 @@ contract TradeEscrowFuzzTest is Test {
         good.approve(address(escrow), type(uint256).max);
 
         vm.prank(alice);
-        bytes32 tradeId = escrow.createTrade(bob);
+        bytes32 tradeId = escrow.createTrade(bob, block.timestamp + 7 days);
         vm.prank(alice);
         escrow.addERC20(tradeId, address(good), aliceAmount);
         vm.prank(bob);
         escrow.addERC20(tradeId, address(good), bobAmount);
 
+        (,,,,,,,, uint256 version) = escrow.getTrade(tradeId);
         vm.prank(alice);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
         vm.prank(bob);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
 
         assertEq(good.balanceOf(alice), bobAmount);
         assertEq(good.balanceOf(bob), aliceAmount);
         assertEq(good.balanceOf(address(escrow)), 0);
 
-        (,,,, bool executed,,) = escrow.getTrade(tradeId);
+        (,,,, bool executed,,,,) = escrow.getTrade(tradeId);
         assertTrue(executed);
     }
 
@@ -67,23 +68,24 @@ contract TradeEscrowFuzzTest is Test {
         bad.approve(address(escrow), type(uint256).max);
 
         vm.prank(alice);
-        bytes32 tradeId = escrow.createTrade(bob);
+        bytes32 tradeId = escrow.createTrade(bob, block.timestamp + 7 days);
         vm.prank(alice);
         escrow.addNFT(tradeId, address(nft), tokenId);
         vm.prank(bob);
         escrow.addERC20(tradeId, address(bad), payment);
 
+        (,,,,,,,, uint256 version) = escrow.getTrade(tradeId);
         vm.prank(alice);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
         vm.expectRevert();
         vm.prank(bob);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
 
         assertEq(nft.ownerOf(tokenId), alice);
         assertEq(bad.balanceOf(bob), payment);
         assertEq(bad.balanceOf(alice), 0);
 
-        (,,,, bool executed,,) = escrow.getTrade(tradeId);
+        (,,,, bool executed,,,,) = escrow.getTrade(tradeId);
         assertFalse(executed);
     }
 }
@@ -119,16 +121,17 @@ contract ConservationHandler is Test {
         if (bobAmount > bobBal) bobAmount = bobBal;
 
         vm.prank(alice);
-        bytes32 tradeId = escrow.createTrade(bob);
+        bytes32 tradeId = escrow.createTrade(bob, block.timestamp + 7 days);
         vm.prank(alice);
         escrow.addERC20(tradeId, address(token), aliceAmount);
         vm.prank(bob);
         escrow.addERC20(tradeId, address(token), bobAmount);
 
+        (,,,,,,,, uint256 version) = escrow.getTrade(tradeId);
         vm.prank(alice);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
         vm.prank(bob);
-        escrow.approveTrade(tradeId);
+        escrow.approveTrade(tradeId, version);
     }
 }
 

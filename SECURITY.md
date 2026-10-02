@@ -14,7 +14,9 @@ Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit repo
 | M-01 | Callback can cancel settlement after the first leg | Medium | Fixed |
 | M-02 | Fee-on-transfer tokens settle a short payment | Medium | Fixed |
 | M-03 | Unbounded asset lists can block execution | Medium | Fixed |
+| M-04 | Approval is not bound to the bundle contents | Medium | Fixed |
 | L-01 | A listed asset cannot be removed | Low | Fixed |
+| L-02 | An approval never expires | Low | Fixed |
 | I-01 | OpenZeppelin v4 import path | Info | Fixed |
 | I-02 | Cancelling a trade left its asset arrays in storage | Info | Fixed |
 
@@ -73,6 +75,29 @@ A wrong NFT or amount could only be undone by cancelling the whole trade and sta
 
 **Fix:** `removeAsset` drops one of the caller's items (swap-and-pop) and clears both approvals, same as adding an asset. Removing an item after the other party has approved forces both sides to review the bundle again.
 
+## M-04 — Approval is not bound to the bundle contents
+
+**Severity:** Medium
+
+`approveTrade(tradeId)` approved whatever assets were stored at execution time. Approvals were cleared when the bundle changed, but the party who edited the bundle could approve the new one in the same block, ahead of a counterparty transaction that was already signed.
+
+Exploit:
+
+1. Alice and Bob list a real NFT against real tokens. Alice approves.
+2. Bob broadcasts his approval.
+3. Alice, with a higher gas price, removes her NFT, lists a worthless token, and approves that new bundle. Her transaction is ordered first.
+4. Bob's approval then runs settlement. He pays the real tokens and receives the junk.
+
+**Fix:** every add or remove increments `version` and clears both approvals. `approveTrade(tradeId, bundleVersion)` reverts with `StaleBundle` unless `bundleVersion` is the current one. Bob's pending transaction still carries the old version, so it cannot settle Alice's replacement. `test/TradeEscrow.ts` reproduces the sequence and checks that the NFT does not move.
+
+## L-02 — An approval never expires
+
+**Severity:** Low
+
+A trade with one approval stayed open forever. The other party could approve months later, against prices and allowances that no longer matched what the first party meant.
+
+**Fix:** `createTrade` takes a `deadline`. After that timestamp, adds, removes, and approvals revert with `TradeExpired`. `cancelTrade` still works, so the record can be cleared. A deadline that is not in the future is rejected at creation.
+
 ## I-01 — OpenZeppelin v4 import path
 
 **Severity:** Informational
@@ -87,15 +112,15 @@ The contract imported `@openzeppelin/contracts/security/ReentrancyGuard.sol`. Th
 
 Asset lists lived in a mapping inside the `Trade` struct. Solidity does not clear nested mappings on `delete`, so `cancelTrade` zeroed the addresses and left the bundles in storage. Trade ids are unique, so the leftover arrays were not reusable by a later trade. They did waste storage.
 
-**Fix:** asset arrays are stored in a separate mapping. `cancelTrade` deletes both parties' arrays and then the trade record.
+**Fix:** asset arrays are stored in a separate mapping. `cancelTrade` deletes both parties' arrays and then the trade record. Settlement deletes the arrays after the transfers, which refunds the storage gas. `getTrade` on a cancelled id reverts with `TradeNotFound`; the cancelled state is not stored separately.
 
 ## Residual risk
 
 These are accepted properties of the current design, not open findings.
 
-- A token the user chose to list can still lie. If `balanceOf` increases by `amount` without a real economic transfer, the balance check passes. The escrow cannot tell a dishonest token from a normal one. The check does stop an honest fee, a `false` return, and a no-op that leaves balances unchanged.
-- The same limit applies to NFTs. After `transferFrom` the contract requires `ownerOf(tokenId) == recipient`. An NFT that lies about its owner gets through.
-- Listing an NFT requires `setApprovalForAll`. A one-token `approve` is not enough to list. Settlement itself uses `transferFrom`, which accepts either approval.
+- A token the user chose to list can still lie. If `balanceOf` increases by `amount` without a real economic transfer, or `ownerOf` reports the recipient after a no-op, the checks pass. The escrow cannot tell a dishonest token from a normal one. The wallet UI has to warn on contracts it does not know, or only offer an allowlist. The on-chain checks stop an honest fee, a `false` return, and a no-op that leaves balances unchanged.
+- Listing an NFT requires `setApprovalForAll`. A one-token `approve` is not enough to list.
+- Settlement uses ERC-721 `transferFrom`. That call does not ask the recipient to support ERC-721, so an NFT can be delivered to a contract that has no way to send it back. Review the counterparty address before approving.
 - ETH is not an asset of this escrow. The contract does not receive ether and does not refund it, so there is no `address.transfer` path.
 - There is no admin, pause, or upgrade. A bad version is replaced by deploying a new address.
 - No deployment in this repository is verified on an explorer. Addresses will be added to the README when one is.
@@ -109,5 +134,7 @@ These are accepted properties of the current design, not open findings.
 | No-return-data ERC-20 settles the exact amount | `test/TradeEscrow.ts` |
 | Cancel from a token callback does not break the swap | `test/TradeEscrow.ts` |
 | Cap, removal, approval reset, one-sided offer | `test/TradeEscrow.ts` |
+| Stale bundle version does not settle the replacement offer | `test/TradeEscrow.ts` |
+| Deadline blocks a late approval; cancel still works | `test/TradeEscrow.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |

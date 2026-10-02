@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.28;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -9,8 +9,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @title TradeEscrow
 /// @notice Two-party atomic swaps of ERC-20 and ERC-721 bundles.
 /// @dev Assets stay in the owners' wallets until both parties approve the same
-///      bundle. Settlement then runs in one transaction: every leg succeeds, or
-///      the whole trade reverts. The contract never custodies assets.
+///      bundle version. Settlement then runs in one transaction: every leg
+///      succeeds, or the whole trade reverts. The contract never custodies assets.
 contract TradeEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -37,6 +37,8 @@ contract TradeEscrow is ReentrancyGuard {
         bool initiatorApproved;
         bool counterpartyApproved;
         bool executed;
+        uint256 deadline;
+        uint256 version;
     }
 
     /// @dev Asset lists live outside `Trade`. A struct `delete` does not clear
@@ -45,7 +47,9 @@ contract TradeEscrow is ReentrancyGuard {
     mapping(bytes32 => mapping(address => Asset[])) private _assets;
     uint256 private _tradeNonce;
 
-    event TradeCreated(bytes32 indexed tradeId, address indexed initiator, address indexed counterparty);
+    event TradeCreated(
+        bytes32 indexed tradeId, address indexed initiator, address indexed counterparty, uint256 deadline
+    );
     event AssetAdded(
         bytes32 indexed tradeId,
         address indexed owner,
@@ -61,15 +65,17 @@ contract TradeEscrow is ReentrancyGuard {
         uint256 tokenId,
         uint256 amount
     );
-    event TradeApproved(bytes32 indexed tradeId, address indexed party);
+    event TradeApproved(bytes32 indexed tradeId, address indexed party, uint256 bundleVersion);
     event TradeCompleted(bytes32 indexed tradeId);
     event TradeCancelled(bytes32 indexed tradeId);
 
     error InvalidCounterparty();
     error SelfTrade();
     error TradeNotFound();
-    error TradeAlreadyExists();
     error TradeAlreadyExecuted();
+    error InvalidDeadline();
+    error TradeExpired();
+    error StaleBundle(uint256 currentVersion);
     error NotParticipant();
     error ZeroAddress();
     error ZeroAmount();
@@ -94,7 +100,9 @@ contract TradeEscrow is ReentrancyGuard {
             bool counterpartyApproved,
             bool executed,
             uint256 initiatorAssetCount,
-            uint256 counterpartyAssetCount
+            uint256 counterpartyAssetCount,
+            uint256 deadline,
+            uint256 version
         )
     {
         Trade storage trade = _trades[tradeId];
@@ -107,6 +115,8 @@ contract TradeEscrow is ReentrancyGuard {
         executed = trade.executed;
         initiatorAssetCount = _assets[tradeId][initiator].length;
         counterpartyAssetCount = _assets[tradeId][counterparty].length;
+        deadline = trade.deadline;
+        version = trade.version;
     }
 
     function getAssets(bytes32 tradeId, address party) external view returns (Asset[] memory) {
@@ -114,24 +124,28 @@ contract TradeEscrow is ReentrancyGuard {
         return _assets[tradeId][party];
     }
 
-    function createTrade(address counterparty) external nonReentrant returns (bytes32 tradeId) {
+    /// @notice Opens a trade that can be approved until `deadline` (a unix timestamp).
+    function createTrade(address counterparty, uint256 deadline) external returns (bytes32 tradeId) {
         if (counterparty == address(0)) revert InvalidCounterparty();
         if (counterparty == msg.sender) revert SelfTrade();
+        if (deadline <= block.timestamp) revert InvalidDeadline();
 
         uint256 nonce = ++_tradeNonce;
         tradeId = keccak256(abi.encode(msg.sender, counterparty, block.timestamp, nonce));
 
         Trade storage trade = _trades[tradeId];
-        if (trade.initiator != address(0)) revert TradeAlreadyExists();
-
         trade.initiator = msg.sender;
         trade.counterparty = counterparty;
+        trade.deadline = deadline;
 
-        emit TradeCreated(tradeId, msg.sender, counterparty);
+        emit TradeCreated(tradeId, msg.sender, counterparty, deadline);
     }
 
+    /// @notice Lists an NFT. The caller must have called `setApprovalForAll` for this escrow.
+    ///         A single-token `approve` is not accepted. Settlement uses `transferFrom`, which
+    ///         does not ask the recipient to accept the NFT.
     function addNFT(bytes32 tradeId, address nftContract, uint256 tokenId) external nonReentrant {
-        Trade storage trade = _requireOpenParticipant(tradeId);
+        Trade storage trade = _requireLiveParticipant(tradeId);
         if (nftContract == address(0)) revert ZeroAddress();
 
         Asset[] storage items = _assets[tradeId][msg.sender];
@@ -149,12 +163,12 @@ contract TradeEscrow is ReentrancyGuard {
             assetType: AssetType.ERC721
         }));
 
-        _resetApprovals(trade);
+        _bumpBundle(trade);
         emit AssetAdded(tradeId, msg.sender, nftContract, uint8(AssetType.ERC721), tokenId, 1);
     }
 
     function addERC20(bytes32 tradeId, address tokenContract, uint256 amount) external nonReentrant {
-        Trade storage trade = _requireOpenParticipant(tradeId);
+        Trade storage trade = _requireLiveParticipant(tradeId);
         if (tokenContract == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
 
@@ -173,14 +187,14 @@ contract TradeEscrow is ReentrancyGuard {
             assetType: AssetType.ERC20
         }));
 
-        _resetApprovals(trade);
+        _bumpBundle(trade);
         emit AssetAdded(tradeId, msg.sender, tokenContract, uint8(AssetType.ERC20), 0, amount);
     }
 
     /// @notice Removes one of the caller's listed assets. Uses swap-and-pop, so
-    ///         later indexes move. Both approvals are cleared.
+    ///         later indexes move. Both approvals are cleared and the bundle version increments.
     function removeAsset(bytes32 tradeId, uint256 index) external nonReentrant {
-        Trade storage trade = _requireOpenParticipant(tradeId);
+        Trade storage trade = _requireLiveParticipant(tradeId);
 
         Asset[] storage items = _assets[tradeId][msg.sender];
         if (index >= items.length) revert InvalidIndex();
@@ -192,13 +206,16 @@ contract TradeEscrow is ReentrancyGuard {
         }
         items.pop();
 
-        _resetApprovals(trade);
+        _bumpBundle(trade);
         emit AssetRemoved(tradeId, msg.sender, removed.contractAddress, removed.tokenId, removed.amount);
     }
 
-    /// @notice Approves the current bundle. The second approval settles the trade.
-    function approveTrade(bytes32 tradeId) external nonReentrant {
-        Trade storage trade = _requireOpenParticipant(tradeId);
+    /// @notice Approves bundle `bundleVersion`. The second matching approval settles the trade.
+    /// @dev Passing the version the caller reviewed stops a counterparty from changing the
+    ///      bundle and having this transaction settle the new one.
+    function approveTrade(bytes32 tradeId, uint256 bundleVersion) external nonReentrant {
+        Trade storage trade = _requireLiveParticipant(tradeId);
+        if (trade.version != bundleVersion) revert StaleBundle(trade.version);
         if (_assets[tradeId][msg.sender].length == 0) revert EmptyOffer(msg.sender);
 
         if (msg.sender == trade.initiator) {
@@ -207,7 +224,7 @@ contract TradeEscrow is ReentrancyGuard {
             trade.counterpartyApproved = true;
         }
 
-        emit TradeApproved(tradeId, msg.sender);
+        emit TradeApproved(tradeId, msg.sender, bundleVersion);
 
         if (trade.initiatorApproved && trade.counterpartyApproved) {
             _executeTrade(tradeId);
@@ -215,7 +232,7 @@ contract TradeEscrow is ReentrancyGuard {
     }
 
     function cancelTrade(bytes32 tradeId) external nonReentrant {
-        Trade storage trade = _requireOpenParticipant(tradeId);
+        Trade storage trade = _requireParticipant(tradeId);
         address initiator = trade.initiator;
         address counterparty = trade.counterparty;
 
@@ -244,51 +261,70 @@ contract TradeEscrow is ReentrancyGuard {
         _transferAll(_assets[tradeId][initiator], initiator, counterparty);
         _transferAll(_assets[tradeId][counterparty], counterparty, initiator);
 
+        delete _assets[tradeId][initiator];
+        delete _assets[tradeId][counterparty];
+
         emit TradeCompleted(tradeId);
     }
 
     function _transferAll(Asset[] storage items, address from, address to) internal {
         uint256 length = items.length;
-        for (uint256 i = 0; i < length; ++i) {
-            Asset memory asset = items[i];
+        for (uint256 i; i < length;) {
+            Asset storage asset = items[i];
             if (asset.assetType == AssetType.ERC721) {
-                IERC721 nft = IERC721(asset.contractAddress);
-                nft.transferFrom(from, to, asset.tokenId);
-                if (nft.ownerOf(asset.tokenId) != to) revert NftNotReceived();
+                address nftContract = asset.contractAddress;
+                uint256 tokenId = asset.tokenId;
+                IERC721 nft = IERC721(nftContract);
+                nft.transferFrom(from, to, tokenId);
+                if (nft.ownerOf(tokenId) != to) revert NftNotReceived();
             } else {
-                IERC20 token = IERC20(asset.contractAddress);
+                address tokenContract = asset.contractAddress;
+                uint256 amount = asset.amount;
+                IERC20 token = IERC20(tokenContract);
                 uint256 balanceBefore = token.balanceOf(to);
-                // Reverts if the token returns false or returns no success flag
-                // that decodes to false. Empty return data (USDT) is accepted.
-                token.safeTransferFrom(from, to, asset.amount);
-                if (token.balanceOf(to) - balanceBefore != asset.amount) {
+                // Reverts if the token returns false. Empty return data (USDT) is accepted.
+                token.safeTransferFrom(from, to, amount);
+                if (token.balanceOf(to) - balanceBefore != amount) {
                     revert FeeOnTransferNotSupported();
                 }
+            }
+            unchecked {
+                ++i;
             }
         }
     }
 
-    function _requireOpenParticipant(bytes32 tradeId) internal view returns (Trade storage trade) {
+    function _requireParticipant(bytes32 tradeId) internal view returns (Trade storage trade) {
         trade = _trades[tradeId];
         if (trade.initiator == address(0)) revert TradeNotFound();
         if (trade.executed) revert TradeAlreadyExecuted();
         if (msg.sender != trade.initiator && msg.sender != trade.counterparty) revert NotParticipant();
     }
 
-    function _resetApprovals(Trade storage trade) internal {
+    function _requireLiveParticipant(bytes32 tradeId) internal view returns (Trade storage trade) {
+        trade = _requireParticipant(tradeId);
+        if (block.timestamp > trade.deadline) revert TradeExpired();
+    }
+
+    function _bumpBundle(Trade storage trade) internal {
         trade.initiatorApproved = false;
         trade.counterpartyApproved = false;
+        unchecked {
+            trade.version += 1;
+        }
     }
 
     function _containsNft(Asset[] storage items, address nftContract, uint256 tokenId) internal view returns (bool) {
         uint256 length = items.length;
-        for (uint256 i = 0; i < length; ++i) {
+        for (uint256 i; i < length;) {
             if (
-                items[i].assetType == AssetType.ERC721
-                    && items[i].contractAddress == nftContract
+                items[i].assetType == AssetType.ERC721 && items[i].contractAddress == nftContract
                     && items[i].tokenId == tokenId
             ) {
                 return true;
+            }
+            unchecked {
+                ++i;
             }
         }
         return false;
@@ -296,9 +332,12 @@ contract TradeEscrow is ReentrancyGuard {
 
     function _listedErc20(Asset[] storage items, address tokenContract) internal view returns (uint256 total) {
         uint256 length = items.length;
-        for (uint256 i = 0; i < length; ++i) {
+        for (uint256 i; i < length;) {
             if (items[i].assetType == AssetType.ERC20 && items[i].contractAddress == tokenContract) {
                 total += items[i].amount;
+            }
+            unchecked {
+                ++i;
             }
         }
     }
