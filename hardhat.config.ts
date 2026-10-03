@@ -24,12 +24,33 @@ function loadDotEnv() {
 loadDotEnv();
 
 const privateKey = process.env.TEST_PRIVATE_KEY1 || process.env.PRIVATE_KEY || "";
+const etherscanKey = process.env.ETHERSCAN_API_KEY;
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.28",
-    settings: {
-      evmVersion: "cancun",
+    compilers: [
+      {
+        version: "0.8.28",
+        settings: {
+          evmVersion: "cancun",
+        },
+      },
+      {
+        version: "0.8.24",
+        settings: {
+          optimizer: { enabled: true, runs: 200 },
+          evmVersion: "cancun",
+        },
+      },
+    ],
+    overrides: {
+      "contracts/vendor/SchrodingerBox.sol": {
+        version: "0.8.24",
+        settings: {
+          optimizer: { enabled: true, runs: 200 },
+          evmVersion: "cancun",
+        },
+      },
     },
   },
   networks: {
@@ -39,6 +60,7 @@ const config: HardhatUserConfig = {
       chainId: 11155111,
     },
   },
+  ...(etherscanKey ? { etherscan: { apiKey: { sepolia: etherscanKey } } } : {}),
 };
 
 export default config;

@@ -1,6 +1,6 @@
 # TradeEscrow security review
 
-Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit report. This is not an external audit. The findings below were in the previous version of the contract. Each one except the seal check was already fixed. O-01 is fixed in this source by the seal, and the Hardhat suite has a regression test for it. The contracts are for testnet use. Do not treat this file as an audit.
+Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit report. This is not an external audit. Every finding listed here is fixed in the current source. O-01 was the last of them, fixed with the seal, and the Hardhat suite has a regression test for it. The contracts are for testnet use. Do not treat this file as an audit.
 
 **Scope:** `TradeEscrow` — two-party atomic escrow for ERC-20 and ERC-721 bundles. Assets stay in the owners' wallets until both parties approve; settlement is a single transaction.
 
@@ -182,6 +182,7 @@ These are accepted properties of the current design, not open findings.
 | O-01 token arriving at the seller unseals the box | `test/TradeEscrow.ts` |
 | Box transferred away and back still settles | `test/TradeEscrow.ts` |
 | Bridged box rolls the trade back | `test/TradeEscrow.ts` |
+| Real SchrodingerBox settles while sealed, and a burned shadow reverts the trade | `test/TradeEscrow.ts` |
 | A shadow can be listed because it is always sealed | `test/TradeEscrow.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |
