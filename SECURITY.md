@@ -19,6 +19,9 @@ Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit repo
 | L-02 | An approval never expires | Low | Fixed |
 | I-01 | OpenZeppelin v4 import path | Info | Fixed |
 | I-02 | Cancelling a trade left its asset arrays in storage | Info | Fixed |
+| O-01 | A listed box can be emptied before settlement | High | Open |
+
+The finding marked **Open** is not fixed in the current source. It is specified below so the next change can implement it. Do not treat this file as an audit.
 
 ## H-01 — `transferFrom` return value is ignored
 
@@ -113,6 +116,44 @@ The contract imported `@openzeppelin/contracts/security/ReentrancyGuard.sol`. Th
 Asset lists lived in a mapping inside the `Trade` struct. Solidity does not clear nested mappings on `delete`, so `cancelTrade` zeroed the addresses and left the bundles in storage. Trade ids are unique, so the leftover arrays were not reusable by a later trade. They did waste storage.
 
 **Fix:** asset arrays are stored in a separate mapping. `cancelTrade` deletes both parties' arrays and then the trade record. Settlement deletes the arrays after the transfers, which refunds the storage gas. `getTrade` on a cancelled id reverts with `TradeNotFound`; the cancelled state is not stored separately.
+
+## Open — still to implement
+
+### O-01 — A listed box can be emptied before settlement
+
+**Severity:** High
+
+`TradeEscrow` records an NFT as a contract address and a token id. It does not record what is inside that NFT. Assets stay in the owner's wallet until settlement, so the owner can still call `withdrawERC20` or `withdrawNFT` on a Schrödinger's Box. `bundleVersion` increases when an asset is added to or removed from the trade. It does not increase when the contents of a listed asset change.
+
+Exploit:
+
+1. Alice lists box #7 with 1,000 tokens inside. Bob lists his NFT and approves.
+2. Alice withdraws the 1,000 tokens from the box. The escrow still sees the same NFT.
+3. Alice approves. Settlement transfers the empty box to Bob.
+
+If Bob is the one about to approve, Alice can see that transaction and put a withdrawal ahead of it with a higher gas price. Bridging the box does not have this outcome: the box moves to the box contract, `transferFrom` fails, and the trade rolls back.
+
+This is the same shape as an NFT that represents a Uniswap v3 position: the seller removes the liquidity just before the sale completes.
+
+**To implement, in `SchrodingerBox`:** a counter that increases on every deposit and withdrawal, and ERC-165 so other contracts can recognise it.
+
+```solidity
+interface IContentVersioned {
+    function contentVersion(uint256 tokenId) external view returns (uint256);
+}
+```
+
+`depositERC20`, `withdrawERC20`, `depositNFT`, and `withdrawNFT` increment `contentVersion[boxId]`. `supportsInterface` returns true for `type(IContentVersioned).interfaceId`.
+
+**To implement, in `TradeEscrow`:** when an NFT is listed, if the contract reports that interface, store the version. At settlement, before the NFT moves, revert with `ContentChanged` if the version is different.
+
+The check has to be a `staticcall` to `supportsInterface`. Many NFTs do not implement ERC-165, and `addNFT` must still accept those. The check is not special to Schrödinger's Box. Any container NFT that exposes the same interface gets it.
+
+After this, a change inside the box fails settlement. Bob does not lose his side of the trade. Alice has to remove the box from the trade and list it again, which bumps `bundleVersion` and clears both approvals, so Bob has to look again and approve again.
+
+Add a test in `test/TradeEscrow.ts` that runs the withdrawal above and expects `ContentChanged`.
+
+Until that code exists, the wallet shows the box contents next to the NFT and refuses the accept button when a deposit or withdrawal landed after the box was listed. That warning is not a substitute for the settlement check. A user who skips the wallet can still settle an emptied box.
 
 ## Residual risk
 

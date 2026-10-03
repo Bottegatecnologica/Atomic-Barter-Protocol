@@ -24,6 +24,7 @@ import {
   isSepoliaTestAsset,
 } from "../lib/sepolia"
 import { formatTokenAmount, loadShelf, loadTrades, type KnownTrade, type Shelf } from "../lib/shelf"
+import { boxKey, isSchrodingerBox, readBoxInsides, type BoxInside } from "../lib/box"
 
 interface TradeView {
   initiator: string
@@ -52,6 +53,9 @@ function shortAddress(address: string) {
 }
 
 function formatAsset(asset: ListedAsset) {
+  if (asset.assetType === 1 && isSchrodingerBox(asset.contractAddress)) {
+    return `Schrödinger's Box #${asset.tokenId.toString()}`
+  }
   if (asset.assetType === 1) {
     return `NFT ${shortAddress(asset.contractAddress)} #${asset.tokenId.toString()}`
   }
@@ -87,6 +91,30 @@ async function readSettledBundle(escrow: Contract, tradeId: string) {
   return bundleFromLogs(logs)
 }
 
+async function storedBundle(escrow: Contract, id: string, view: TradeView) {
+  const [left, right] = await Promise.all([
+    escrow.getAssets(id, view.initiator),
+    escrow.getAssets(id, view.counterparty),
+  ])
+  const lists = new Map<string, ListedAsset[]>()
+  lists.set(view.initiator.toLowerCase(), mapStoredAssets(view.initiator, left))
+  lists.set(view.counterparty.toLowerCase(), mapStoredAssets(view.counterparty, right))
+  return lists
+}
+
+async function listingBlocks(escrow: Contract, id: string) {
+  const added = await escrow.queryFilter(escrow.filters.AssetAdded(id))
+  const blocks = new Map<string, number>()
+  for (const entry of added) {
+    if (!(entry instanceof EventLog)) continue
+    if (Number(entry.args.assetType) !== 1) continue
+    const key = boxKey(String(entry.args.contractAddress), BigInt(entry.args.tokenId))
+    const previous = blocks.get(key) ?? 0
+    if (entry.blockNumber >= previous) blocks.set(key, entry.blockNumber)
+  }
+  return blocks
+}
+
 function mapStoredAssets(owner: string, rows: Array<{ contractAddress: string; tokenId: bigint; amount: bigint; assetType: number }>) {
   return rows.map((row) => ({
     owner,
@@ -108,6 +136,7 @@ export function TradeInterface() {
   const [tradeId, setTradeId] = useState("")
   const [trade, setTrade] = useState<TradeView | null>(null)
   const [bundle, setBundle] = useState<Map<string, ListedAsset[]>>(new Map())
+  const [insides, setInsides] = useState<Map<string, BoxInside>>(new Map())
   const [bundleSource, setBundleSource] = useState<"storage" | "events" | null>(null)
   const [assetKind, setAssetKind] = useState<"ERC20" | "ERC721">("ERC721")
   const [assetAddress, setAssetAddress] = useState("")
@@ -232,20 +261,14 @@ export function TradeInterface() {
       version: row[8],
     }
     setTrade(view)
-    if (view.executed) {
-      setBundle(await readSettledBundle(escrow, id))
-      setBundleSource("events")
-      return
-    }
-    const [left, right] = await Promise.all([
-      escrow.getAssets(id, view.initiator),
-      escrow.getAssets(id, view.counterparty),
-    ])
-    const lists = new Map<string, ListedAsset[]>()
-    lists.set(view.initiator.toLowerCase(), mapStoredAssets(view.initiator, left))
-    lists.set(view.counterparty.toLowerCase(), mapStoredAssets(view.counterparty, right))
+    const lists = view.executed
+      ? await readSettledBundle(escrow, id)
+      : await storedBundle(escrow, id, view)
     setBundle(lists)
-    setBundleSource("storage")
+    setBundleSource(view.executed ? "events" : "storage")
+    const flat = [...lists.values()].flat()
+    const listedAt = await listingBlocks(escrow, id)
+    setInsides(await readBoxInsides(provider, flat, listedAt))
   }
 
   useEffect(() => {
@@ -303,7 +326,7 @@ export function TradeInterface() {
       setStatus("The token address is not valid. It must start with 0x.")
       return
     }
-    const known = isSepoliaTestAsset(token) || isAllowlisted(token, allowlist)
+    const known = isSepoliaTestAsset(token) || isSchrodingerBox(token) || isAllowlisted(token, allowlist)
     if (!known && !acknowledged) {
       setStatus("This token is not one you have already accepted. Tick the confirmation, or remember it on this computer.")
       return
@@ -459,6 +482,7 @@ export function TradeInterface() {
     setAcknowledged(false)
   }
 
+  const contentChanged = [...insides.values()].some((item) => item.changed)
   const youApproved = trade
     ? account?.toLowerCase() === trade.initiator.toLowerCase()
       ? trade.initiatorApproved
@@ -653,6 +677,7 @@ export function TradeInterface() {
                 title="You give"
                 hint={trade && !trade.executed ? "Drop a test asset here." : undefined}
                 assets={myAssets}
+                insides={insides}
                 onRemove={trade && !trade.executed ? removeMine : undefined}
                 drop={trade && !trade.executed ? {
                   active: dropOver,
@@ -664,12 +689,18 @@ export function TradeInterface() {
                   onDrop: (event) => void dropOnGive(event),
                 } : undefined}
               />
-              <AssetColumn title="You receive" assets={theirAssets} />
+              <AssetColumn title="You receive" assets={theirAssets} insides={insides} />
             </div>
+
+            {contentChanged && (
+              <p className="mt-4 rounded-xl border border-amber-300/40 bg-amber-400/15 p-3 text-sm text-amber-50">
+                The contents of a box in this trade changed after it was listed. Accept stays off. Remove that box and list it again.
+              </p>
+            )}
 
             {trade && !trade.executed && (
               <div className="mt-4 flex flex-wrap gap-2">
-                <Button disabled={busy} onClick={approve}>
+                <Button disabled={busy || contentChanged} onClick={approve}>
                   I accept version {trade.version.toString()}
                 </Button>
                 <Button variant="outline" disabled={busy} onClick={cancel}>
@@ -816,12 +847,14 @@ function AssetColumn({
   title,
   hint,
   assets,
+  insides,
   onRemove,
   drop,
 }: {
   title: string
   hint?: string
   assets: ListedAsset[]
+  insides?: Map<string, BoxInside>
   onRemove?: (index: number) => void
   drop?: {
     active: boolean
@@ -843,16 +876,32 @@ function AssetColumn({
         <p className="mt-3 text-sm text-zinc-500">Nothing yet.</p>
       ) : (
         <ul className="mt-3 space-y-2">
-          {assets.map((asset, index) => (
-            <li key={`${asset.contractAddress}-${asset.tokenId}-${asset.amount}-${index}`} className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.04] px-3 py-2">
-              <span className="font-mono text-xs text-zinc-200">{formatAsset(asset)}</span>
-              {onRemove && (
-                <Button variant="ghost" onClick={() => onRemove(index)}>
-                  Remove
-                </Button>
-              )}
-            </li>
-          ))}
+          {assets.map((asset, index) => {
+            const inside = insides?.get(boxKey(asset.contractAddress, asset.tokenId))
+            return (
+              <li key={`${asset.contractAddress}-${asset.tokenId}-${asset.amount}-${index}`} className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.04] px-3 py-2">
+                <div className="min-w-0">
+                  <span className="font-mono text-xs text-zinc-200">{formatAsset(asset)}</span>
+                  {inside && (
+                    <p className={`mt-1 text-xs ${inside.changed ? "text-amber-200" : "text-zinc-400"}`}>
+                      {inside.lines.join(" · ")}
+                    </p>
+                  )}
+                  {inside?.changed && (
+                    <p className="mt-1 text-xs font-medium text-amber-200">The contents of this box changed after it was listed.</p>
+                  )}
+                  {inside?.unread && (
+                    <p className="mt-1 text-xs text-amber-200">Could not check whether this box changed after it was listed.</p>
+                  )}
+                </div>
+                {onRemove && (
+                  <Button variant="ghost" onClick={() => onRemove(index)}>
+                    Remove
+                  </Button>
+                )}
+              </li>
+            )
+          })}
         </ul>
       )}
     </div>
