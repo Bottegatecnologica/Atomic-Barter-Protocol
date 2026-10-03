@@ -8,7 +8,8 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "test:fuzz": "forge test",
-    "node": "hardhat node"
+    "node": "hardhat node",
+    "deploy:sepolia": "hardhat run scripts/deploySepolia.ts --network sepolia"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

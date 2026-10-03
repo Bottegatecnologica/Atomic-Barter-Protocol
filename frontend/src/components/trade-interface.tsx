@@ -12,6 +12,16 @@ import {
   type BundleLog,
   type ListedAsset,
 } from "../lib/escrow"
+import {
+  SEPOLIA_ESCROW,
+  SEPOLIA_TEST_ERC20,
+  SEPOLIA_TEST_ERC721,
+  TEST_ERC20_ABI,
+  TEST_ERC20_MINT,
+  TEST_ERC721_ABI,
+  ensureSepolia,
+  isSepoliaTestAsset,
+} from "../lib/sepolia"
 
 interface TradeView {
   initiator: string
@@ -87,9 +97,10 @@ function mapStoredAssets(owner: string, rows: Array<{ contractAddress: string; t
 
 export function TradeInterface() {
   const [account, setAccount] = useState<string | null>(null)
-  const [escrowAddress, setEscrowAddress] = useState(
-    () => localStorage.getItem("atomic-barter.escrow") ?? "",
-  )
+  const [escrowAddress, setEscrowAddress] = useState(() => {
+    const saved = localStorage.getItem("atomic-barter.escrow")
+    return saved && isAddress(saved) ? saved : SEPOLIA_ESCROW
+  })
   const [counterparty, setCounterparty] = useState("")
   const [deadlineInput, setDeadlineInput] = useState(defaultDeadlineInput)
   const [tradeId, setTradeId] = useState("")
@@ -113,7 +124,7 @@ export function TradeInterface() {
     setAcknowledged(false)
   }, [assetAddress])
 
-  const unknownAsset = isAddress(assetAddress) && !isAllowlisted(assetAddress, allowlist)
+  const unknownAsset = isAddress(assetAddress) && !isSepoliaTestAsset(assetAddress) && !isAllowlisted(assetAddress, allowlist)
   const canAddUnknown = !unknownAsset || acknowledged
 
   const myAssets = useMemo(() => {
@@ -132,9 +143,21 @@ export function TradeInterface() {
       setStatus("This browser has no wallet. Install one and reload the page.")
       return
     }
+    try {
+      await ensureSepolia()
+      const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
+      const signer = await provider.getSigner()
+      setAccount(await signer.getAddress())
+    } catch (error) {
+      setStatus(explain(error))
+    }
+  }
+
+  async function walletSigner() {
+    if (!window.ethereum) throw new Error("Connect a wallet first.")
+    await ensureSepolia()
     const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
-    const signer = await provider.getSigner()
-    setAccount(await signer.getAddress())
+    return provider.getSigner()
   }
 
   function escrowContract(signerOrProvider: BrowserProvider | Awaited<ReturnType<BrowserProvider["getSigner"]>>) {
@@ -143,17 +166,14 @@ export function TradeInterface() {
   }
 
   async function signerContract() {
-    if (!window.ethereum) throw new Error("Connect a wallet first.")
-    const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
-    return escrowContract(await provider.getSigner())
+    return escrowContract(await walletSigner())
   }
 
   async function refresh(id = tradeId) {
     if (!isAddress(escrowAddress) || !id.startsWith("0x") || id.length !== 66) return
-    const provider = window.ethereum
-      ? new BrowserProvider(window.ethereum as Eip1193Provider)
-      : null
-    if (!provider) throw new Error("Connect a wallet to read the trade.")
+    if (!window.ethereum) throw new Error("Connect a wallet to read the trade.")
+    await ensureSepolia()
+    const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
     const escrow = escrowContract(provider)
     const row = await escrow.getTrade(id)
     const view: TradeView = {
@@ -236,7 +256,24 @@ export function TradeInterface() {
     setBusy(true)
     setStatus(null)
     try {
-      const escrow = await signerContract()
+      const signer = await walletSigner()
+      const escrow = escrowContract(signer)
+      if (assetKind === "ERC721") {
+        const nft = new Contract(assetAddress, TEST_ERC721_ABI, signer)
+        const approved = await nft.isApprovedForAll(await signer.getAddress(), escrowAddress)
+        if (!approved) {
+          setStatus("Approve this NFT collection for Atomic Barter, then it can be listed.")
+          await (await nft.setApprovalForAll(escrowAddress, true)).wait()
+        }
+      } else {
+        const token = new Contract(assetAddress, TEST_ERC20_ABI, signer)
+        const needed = BigInt(amount)
+        const allowance = await token.allowance(await signer.getAddress(), escrowAddress)
+        if (allowance < needed) {
+          setStatus("Approve this token amount for Atomic Barter, then it can be listed.")
+          await (await token.approve(escrowAddress, needed)).wait()
+        }
+      }
       const tx = assetKind === "ERC721"
         ? await escrow.addNFT(tradeId, assetAddress, BigInt(tokenId))
         : await escrow.addERC20(tradeId, assetAddress, BigInt(amount))
@@ -292,6 +329,40 @@ export function TradeInterface() {
       setBundle(new Map())
       setBundleSource(null)
       setStatus("Trade cancelled. The assets stay in the wallets that held them.")
+    } catch (error) {
+      setStatus(explain(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function mintTestToken(kind: "ERC20" | "ERC721") {
+    const tokenAddress = kind === "ERC20" ? SEPOLIA_TEST_ERC20 : SEPOLIA_TEST_ERC721
+    if (!isAddress(tokenAddress)) {
+      setStatus("The Sepolia test token is not in this build yet.")
+      return
+    }
+    setBusy(true)
+    setStatus(null)
+    try {
+      const signer = await walletSigner()
+      const me = await signer.getAddress()
+      if (kind === "ERC20") {
+        const token = new Contract(tokenAddress, TEST_ERC20_ABI, signer)
+        await (await token.mint(me, TEST_ERC20_MINT)).wait()
+        setAssetKind("ERC20")
+        setAssetAddress(tokenAddress)
+        setAmount(TEST_ERC20_MINT.toString())
+        setStatus("Created 1000 test tokens in your wallet. The amount below is in the token's smallest unit.")
+      } else {
+        const tokenId = BigInt(Date.now())
+        const nft = new Contract(tokenAddress, TEST_ERC721_ABI, signer)
+        await (await nft.mint(me, tokenId)).wait()
+        setAssetKind("ERC721")
+        setAssetAddress(tokenAddress)
+        setTokenId(tokenId.toString())
+        setStatus(`Created test NFT #${tokenId.toString()} in your wallet.`)
+      }
     } catch (error) {
       setStatus(explain(error))
     } finally {
@@ -451,6 +522,24 @@ export function TradeInterface() {
                   Cancel trade
                 </Button>
               </div>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <h2 className="text-base font-semibold">Sepolia test assets</h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              These tokens have no value. Creating one mints it to the connected wallet and fills the form below, so you can list it in the open trade.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button disabled={busy || !account || !isAddress(SEPOLIA_TEST_ERC20)} onClick={() => mintTestToken("ERC20")}>
+                Create test ERC-20
+              </Button>
+              <Button disabled={busy || !account || !isAddress(SEPOLIA_TEST_ERC721)} onClick={() => mintTestToken("ERC721")}>
+                Create test NFT
+              </Button>
+            </div>
+            {!isAddress(SEPOLIA_ESCROW) && (
+              <p className="mt-3 text-sm text-amber-100">The Sepolia contracts are not in this build yet.</p>
             )}
           </section>
 

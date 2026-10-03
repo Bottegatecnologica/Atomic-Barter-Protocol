@@ -113,7 +113,7 @@ Each party's assets live in a separate array, not inside `Trade`. Solidity does 
 | Foundry fuzz / invariant tests | All-or-nothing swap, escrow never custodies tokens |
 | React trade screen | Calls the current contract, warns on unknown tokens, rebuilds settled bundles from events |
 | Wallet & contract integration | Wallet connect, create, add, approve, and cancel |
-| Verified deployment | Not published yet |
+| Sepolia deployment | TradeEscrow and the open-mint test tokens are deployed. Source is not verified on the explorer yet |
 
 The trade screen calls `createTrade(counterparty, deadline)` and `approveTrade(tradeId, version)`. A contract that is not on the local allowlist has to be explicitly accepted before it can be listed. After settlement the screen rebuilds the bundle from `AssetAdded` and `AssetRemoved`, because the contract deletes those arrays.
 
@@ -222,11 +222,13 @@ npx hardhat ignition deploy ./ignition/modules/TradeEscrow.ts --network localhos
 
 ### Deployments
 
-No contract address in this repository is verified on an explorer yet. After a public deployment, add it here.
+Sepolia deployment. The test ERC-20 and test NFT have an open `mint`, so the frontend can create trial assets. They have no value. Source is not verified on the explorer yet.
 
 | Network | Contract | Address | Explorer |
 |---------|----------|---------|----------|
-| — | TradeEscrow | Not deployed | — |
+| Sepolia | TradeEscrow | `0x11dFdDDF9393F01d73c85c50245f5A979209B656` | [view](https://sepolia.etherscan.io/address/0x11dFdDDF9393F01d73c85c50245f5A979209B656) |
+| Sepolia | Test ERC-20 | `0xf0977881b567A4bb4B10eF52f1D088B36E120b24` | [view](https://sepolia.etherscan.io/address/0xf0977881b567A4bb4B10eF52f1D088B36E120b24) |
+| Sepolia | Test NFT | `0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f` | [view](https://sepolia.etherscan.io/address/0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f) |
 
 ### Frontend
 
