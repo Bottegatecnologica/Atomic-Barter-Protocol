@@ -138,26 +138,29 @@ export function TradeInterface() {
     return assetsFor(bundle, other)
   }, [account, bundle, trade])
 
+  async function walletSigner() {
+    const ethereum = window.ethereum
+    if (!ethereum) throw new Error("Connect a wallet first.")
+    // Start the account request in this click turn. Firefox drops the popup
+    // if the first wallet call is only made after another await.
+    const accounts = ethereum.request({ method: "eth_requestAccounts" })
+    await ensureSepolia()
+    await accounts
+    const provider = new BrowserProvider(ethereum as Eip1193Provider)
+    return provider.getSigner()
+  }
+
   async function connect() {
     if (!window.ethereum) {
       setStatus("This browser has no wallet. Install one and reload the page.")
       return
     }
     try {
-      await ensureSepolia()
-      const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
-      const signer = await provider.getSigner()
+      const signer = await walletSigner()
       setAccount(await signer.getAddress())
     } catch (error) {
       setStatus(explain(error))
     }
-  }
-
-  async function walletSigner() {
-    if (!window.ethereum) throw new Error("Connect a wallet first.")
-    await ensureSepolia()
-    const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
-    return provider.getSigner()
   }
 
   function escrowContract(signerOrProvider: BrowserProvider | Awaited<ReturnType<BrowserProvider["getSigner"]>>) {
