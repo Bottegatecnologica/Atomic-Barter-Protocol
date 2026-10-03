@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react"
 import { BrowserProvider, Contract, EventLog, isAddress, type Eip1193Provider } from "ethers"
 import { ShieldAlert, Wallet2 } from "lucide-react"
 import Button from "./ui/button"
@@ -13,6 +13,7 @@ import {
   type ListedAsset,
 } from "../lib/escrow"
 import {
+  SEPOLIA_CHAIN_ID,
   SEPOLIA_ESCROW,
   SEPOLIA_TEST_ERC20,
   SEPOLIA_TEST_ERC721,
@@ -22,6 +23,7 @@ import {
   ensureSepolia,
   isSepoliaTestAsset,
 } from "../lib/sepolia"
+import { formatTokenAmount, loadShelf, loadTrades, type KnownTrade, type Shelf } from "../lib/shelf"
 
 interface TradeView {
   initiator: string
@@ -115,6 +117,11 @@ export function TradeInterface() {
   const [allowlist, setAllowlist] = useState<string[]>([])
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [chainId, setChainId] = useState<number | null>(null)
+  const [shelf, setShelf] = useState<Shelf | null>(null)
+  const [knownTrades, setKnownTrades] = useState<KnownTrade[]>([])
+  const [checkedAt, setCheckedAt] = useState<number | null>(null)
+  const [dropOver, setDropOver] = useState(false)
 
   useEffect(() => {
     setAllowlist(loadAllowlist())
@@ -123,6 +130,39 @@ export function TradeInterface() {
   useEffect(() => {
     setAcknowledged(false)
   }, [assetAddress])
+
+  useEffect(() => {
+    if (!account || !window.ethereum || !isAddress(escrowAddress)) return
+    let stop = false
+    async function tick() {
+      const ethereum = window.ethereum
+      if (!ethereum) return
+      try {
+        const hex = await ethereum.request({ method: "eth_chainId" })
+        const id = typeof hex === "string" ? Number.parseInt(hex, 16) : null
+        if (stop) return
+        setChainId(id)
+        if (id !== SEPOLIA_CHAIN_ID) return
+        const provider = new BrowserProvider(ethereum as Eip1193Provider)
+        const [nextShelf, nextTrades] = await Promise.all([
+          loadShelf(provider, account!),
+          loadTrades(provider, escrowAddress, account!),
+        ])
+        if (stop) return
+        setShelf(nextShelf)
+        setKnownTrades(nextTrades)
+        setCheckedAt(Date.now())
+      } catch {
+        // Keep the last snapshot when a public RPC refuses a log query.
+      }
+    }
+    void tick()
+    const timer = window.setInterval(() => void tick(), 12000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
+  }, [account, escrowAddress])
 
   const unknownAsset = isAddress(assetAddress) && !isSepoliaTestAsset(assetAddress) && !isAllowlisted(assetAddress, allowlist)
   const canAddUnknown = !unknownAsset || acknowledged
@@ -172,10 +212,13 @@ export function TradeInterface() {
     return escrowContract(await walletSigner())
   }
 
-  async function refresh(id = tradeId) {
+  async function refresh(id = tradeId, quiet = false) {
     if (!isAddress(escrowAddress) || !id.startsWith("0x") || id.length !== 66) return
-    if (!window.ethereum) throw new Error("Connect a wallet to read the trade.")
-    await ensureSepolia()
+    if (!window.ethereum) {
+      if (quiet) return
+      throw new Error("Connect a wallet to read the trade.")
+    }
+    if (!quiet) await ensureSepolia()
     const provider = new BrowserProvider(window.ethereum as Eip1193Provider)
     const escrow = escrowContract(provider)
     const row = await escrow.getTrade(id)
@@ -204,6 +247,14 @@ export function TradeInterface() {
     setBundle(lists)
     setBundleSource("storage")
   }
+
+  useEffect(() => {
+    if (!account || !tradeId.startsWith("0x") || tradeId.length !== 66) return
+    const timer = window.setInterval(() => {
+      void refresh(tradeId, true).catch(() => undefined)
+    }, 8000)
+    return () => window.clearInterval(timer)
+  }, [account, tradeId, escrowAddress])
 
   async function createTrade() {
     const deadline = deadlineToUnix(deadlineInput)
@@ -243,16 +294,17 @@ export function TradeInterface() {
     }
   }
 
-  async function addAsset() {
+  async function listAsset(kind: "ERC20" | "ERC721", token: string, id: string, rawAmount: string) {
     if (!trade || trade.executed) {
-      setStatus("Create a trade, or open an existing one. Then you can add the asset.")
+      setStatus("Open a trade, then drop the asset on You give.")
       return
     }
-    if (!isAddress(assetAddress)) {
+    if (!isAddress(token)) {
       setStatus("The token address is not valid. It must start with 0x.")
       return
     }
-    if (!canAddUnknown) {
+    const known = isSepoliaTestAsset(token) || isAllowlisted(token, allowlist)
+    if (!known && !acknowledged) {
       setStatus("This token is not one you have already accepted. Tick the confirmation, or remember it on this computer.")
       return
     }
@@ -261,25 +313,25 @@ export function TradeInterface() {
     try {
       const signer = await walletSigner()
       const escrow = escrowContract(signer)
-      if (assetKind === "ERC721") {
-        const nft = new Contract(assetAddress, TEST_ERC721_ABI, signer)
+      if (kind === "ERC721") {
+        const nft = new Contract(token, TEST_ERC721_ABI, signer)
         const approved = await nft.isApprovedForAll(await signer.getAddress(), escrowAddress)
         if (!approved) {
           setStatus("Approve this NFT collection for Atomic Barter, then it can be listed.")
           await (await nft.setApprovalForAll(escrowAddress, true)).wait()
         }
       } else {
-        const token = new Contract(assetAddress, TEST_ERC20_ABI, signer)
-        const needed = BigInt(amount)
-        const allowance = await token.allowance(await signer.getAddress(), escrowAddress)
+        const erc20 = new Contract(token, TEST_ERC20_ABI, signer)
+        const needed = BigInt(rawAmount)
+        const allowance = await erc20.allowance(await signer.getAddress(), escrowAddress)
         if (allowance < needed) {
           setStatus("Approve this token amount for Atomic Barter, then it can be listed.")
-          await (await token.approve(escrowAddress, needed)).wait()
+          await (await erc20.approve(escrowAddress, needed)).wait()
         }
       }
-      const tx = assetKind === "ERC721"
-        ? await escrow.addNFT(tradeId, assetAddress, BigInt(tokenId))
-        : await escrow.addERC20(tradeId, assetAddress, BigInt(amount))
+      const tx = kind === "ERC721"
+        ? await escrow.addNFT(tradeId, token, BigInt(id))
+        : await escrow.addERC20(tradeId, token, BigInt(rawAmount))
       await tx.wait()
       setAcknowledged(false)
       await refresh()
@@ -287,6 +339,34 @@ export function TradeInterface() {
       setStatus(explain(error))
     } finally {
       setBusy(false)
+    }
+  }
+
+  function addAsset() {
+    return listAsset(assetKind, assetAddress, tokenId, amount)
+  }
+
+  async function dropOnGive(event: DragEvent) {
+    event.preventDefault()
+    setDropOver(false)
+    let payload: { kind?: string; tokenId?: string; amount?: string }
+    try {
+      payload = JSON.parse(event.dataTransfer.getData("text/plain"))
+    } catch {
+      return
+    }
+    if (payload.kind === "ERC721" && payload.tokenId) {
+      setAssetKind("ERC721")
+      setAssetAddress(SEPOLIA_TEST_ERC721)
+      setTokenId(payload.tokenId)
+      await listAsset("ERC721", SEPOLIA_TEST_ERC721, payload.tokenId, "1")
+      return
+    }
+    if (payload.kind === "ERC20" && payload.amount) {
+      setAssetKind("ERC20")
+      setAssetAddress(SEPOLIA_TEST_ERC20)
+      setAmount(payload.amount)
+      await listAsset("ERC20", SEPOLIA_TEST_ERC20, "0", payload.amount)
     }
   }
 
@@ -390,10 +470,23 @@ export function TradeInterface() {
       : trade.initiatorApproved
     : false
 
+  const onSepolia = chainId === SEPOLIA_CHAIN_ID
+
   return (
     <div className="min-h-screen bg-[#07080c] text-zinc-100">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(251,191,36,0.08),_transparent_45%)]" />
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(139,92,246,0.16),_transparent_42%)]" />
       <div className="relative">
+        <div className={`sticky top-0 z-20 border-b px-6 py-3 ${onSepolia || chainId === null ? "border-violet-300/40 bg-violet-700 text-white" : "border-red-300/40 bg-red-700 text-white"}`}>
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold tracking-[0.22em]">SEPOLIA TESTNET</p>
+              <p className="text-sm text-white/90">Chain ID {SEPOLIA_CHAIN_ID}. These assets have no value. This page cannot see a wallet that is on another network.</p>
+            </div>
+            {account && chainId !== null && !onSepolia && (
+              <Button onClick={connect}>Switch wallet to Sepolia</Button>
+            )}
+          </div>
+        </div>
         <header className="border-b border-white/10">
           <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4">
             <div className="flex items-center gap-3">
@@ -402,7 +495,7 @@ export function TradeInterface() {
               </span>
               <div>
                 <h1 className="text-lg font-semibold tracking-tight">Atomic Barter</h1>
-                <p className="text-xs text-zinc-400">Assets move only when both of you accept the same list.</p>
+                <p className="text-xs text-violet-200">Sepolia only. Both sides must accept the same list.</p>
               </div>
             </div>
             <Button onClick={connect}>{account ? shortAddress(account) : "Connect wallet"}</Button>
@@ -472,6 +565,50 @@ export function TradeInterface() {
             </section>
           </div>
 
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold">Trades with you</h2>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Sepolia logs from the last few weeks where your wallet is one of the two sides. The list refreshes while this tab stays open.
+                </p>
+              </div>
+              {checkedAt && (
+                <p className="text-xs text-violet-200">Checked {new Date(checkedAt).toLocaleTimeString()}</p>
+              )}
+            </div>
+            {!account ? (
+              <p className="mt-4 text-sm text-zinc-500">Connect a wallet on Sepolia to see them.</p>
+            ) : knownTrades.length === 0 ? (
+              <p className="mt-4 text-sm text-zinc-500">No trades with this wallet in the recent logs.</p>
+            ) : (
+              <ul className="mt-4 space-y-2">
+                {knownTrades.map((item) => {
+                  const other = account.toLowerCase() === item.initiator.toLowerCase() ? item.counterparty : item.initiator
+                  const label = item.cancelled ? "Cancelled" : item.executed ? "Settled" : "Open"
+                  return (
+                    <li key={item.tradeId}>
+                      <button
+                        className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-left hover:border-violet-300/50"
+                        onClick={() => {
+                          setTradeId(item.tradeId)
+                          void refresh(item.tradeId).catch((error) => setStatus(explain(error)))
+                        }}
+                      >
+                        <span className="text-sm text-zinc-100">
+                          {account.toLowerCase() === item.initiator.toLowerCase() ? "You opened it" : "They opened it"} · {shortAddress(other)}
+                        </span>
+                        <span className={`rounded-full px-3 py-1 text-xs ${item.cancelled ? "bg-white/10 text-zinc-300" : item.executed ? "bg-emerald-400/15 text-emerald-300" : "bg-violet-400/20 text-violet-100"}`}>
+                          {label}{item.cancelled ? "" : ` · version ${item.version.toString()}`}
+                        </span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </section>
+
           <section className="rounded-2xl border border-white/10 bg-[#101218] p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -512,7 +649,21 @@ export function TradeInterface() {
             )}
 
             <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <AssetColumn title="You give" assets={myAssets} onRemove={trade && !trade.executed ? removeMine : undefined} />
+              <AssetColumn
+                title="You give"
+                hint={trade && !trade.executed ? "Drop a test asset here." : undefined}
+                assets={myAssets}
+                onRemove={trade && !trade.executed ? removeMine : undefined}
+                drop={trade && !trade.executed ? {
+                  active: dropOver,
+                  onDragOver: (event) => {
+                    event.preventDefault()
+                    setDropOver(true)
+                  },
+                  onDragLeave: () => setDropOver(false),
+                  onDrop: (event) => void dropOnGive(event),
+                } : undefined}
+              />
               <AssetColumn title="You receive" assets={theirAssets} />
             </div>
 
@@ -541,6 +692,26 @@ export function TradeInterface() {
                 Create test NFT
               </Button>
             </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <ShelfCard
+                title={shelf ? shelf.symbol : "Test ERC-20"}
+                detail={shelf ? formatTokenAmount(shelf.balance, shelf.decimals) : "Connect to see the balance"}
+                draggable={Boolean(shelf && shelf.balance > 0n && trade && !trade.executed)}
+                payload={shelf && shelf.balance > 0n ? JSON.stringify({ kind: "ERC20", amount: shelf.balance.toString() }) : ""}
+              />
+              {(shelf?.nftIds ?? []).map((id) => (
+                <ShelfCard
+                  key={id.toString()}
+                  title={`Test NFT #${id.toString()}`}
+                  detail="Drag onto You give"
+                  draggable={Boolean(trade && !trade.executed)}
+                  payload={JSON.stringify({ kind: "ERC721", tokenId: id.toString() })}
+                />
+              ))}
+            </div>
+            {account && shelf && shelf.nftIds.length === 0 && (
+              <p className="mt-3 text-sm text-zinc-500">No test NFTs in this wallet yet. Create one, then drag it onto an open trade.</p>
+            )}
             {!isAddress(SEPOLIA_ESCROW) && (
               <p className="mt-3 text-sm text-amber-100">The Sepolia contracts are not in this build yet.</p>
             )}
@@ -643,16 +814,31 @@ function Pill({ on, label }: { on: boolean; label: string }) {
 
 function AssetColumn({
   title,
+  hint,
   assets,
   onRemove,
+  drop,
 }: {
   title: string
+  hint?: string
   assets: ListedAsset[]
   onRemove?: (index: number) => void
+  drop?: {
+    active: boolean
+    onDragOver: (event: DragEvent) => void
+    onDragLeave: () => void
+    onDrop: (event: DragEvent) => void
+  }
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+    <div
+      className={`rounded-xl border bg-black/30 p-4 ${drop?.active ? "border-dashed border-violet-300 bg-violet-400/10" : "border-white/10"}`}
+      onDragOver={drop?.onDragOver}
+      onDragLeave={drop?.onDragLeave}
+      onDrop={drop?.onDrop}
+    >
       <h3 className="text-sm font-medium text-zinc-200">{title}</h3>
+      {hint && <p className="mt-1 text-xs text-zinc-500">{hint}</p>}
       {assets.length === 0 ? (
         <p className="mt-3 text-sm text-zinc-500">Nothing yet.</p>
       ) : (
@@ -669,6 +855,23 @@ function AssetColumn({
           ))}
         </ul>
       )}
+    </div>
+  )
+}
+
+function ShelfCard({ title, detail, draggable, payload }: { title: string; detail: string; draggable: boolean; payload: string }) {
+  return (
+    <div
+      draggable={draggable}
+      onDragStart={(event) => {
+        if (!draggable) return
+        event.dataTransfer.setData("text/plain", payload)
+        event.dataTransfer.effectAllowed = "copy"
+      }}
+      className={`rounded-xl border border-white/10 bg-black/40 px-3 py-3 ${draggable ? "cursor-grab active:cursor-grabbing" : "opacity-70"}`}
+    >
+      <p className="text-sm font-medium text-zinc-100">{title}</p>
+      <p className="mt-1 font-mono text-xs text-violet-200">{detail}</p>
     </div>
   )
 }
