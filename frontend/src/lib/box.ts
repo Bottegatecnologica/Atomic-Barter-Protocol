@@ -2,8 +2,8 @@ import { Contract, formatUnits, type Provider } from "ethers"
 import type { ListedAsset } from "./escrow"
 
 const BOXES = [
-  "0x826c31473B3f69a04A6c0335E3c5Fd342571Eb61",
-  "0xe3223C7b87Cf9355b09B69c800F6AE34C80c332e",
+  "0x4642836001Ab04ebDf65f1780F5FB5E297e33990",
+  "0xbC727Eda544c08395A59A4b5e5865375b955be12",
 ]
 
 const PAR = new Set([
@@ -18,6 +18,8 @@ const CATS = new Set([
 
 const BOX_ABI = [
   "function getBoxDetails(uint256 boxId) view returns (address[] erc20Tokens, uint256[] erc20Amounts, address[] erc721Contracts, uint256[] erc721TokenIds, bool isLocked, uint16 originChain, bool isOriginal, uint256 originBoxId)",
+  "function isSealed(uint256 tokenId) view returns (bool)",
+  "function sealState(uint256 tokenId) view returns (uint256)",
   "event ERC20Deposited(uint256 indexed boxId, address indexed token, uint256 amount)",
   "event ERC20Withdrawn(uint256 indexed boxId, address indexed token, uint256 amount)",
   "event NFTDeposited(uint256 indexed boxId, address indexed nftContract, uint256 nftTokenId)",
@@ -84,6 +86,17 @@ export async function readBoxInsides(
     try {
       const details = await contract.getBoxDetails(asset.tokenId)
       let changed = false
+      if (asset.sealedContainer) {
+        try {
+          const [sealed, state] = await Promise.all([
+            contract.isSealed(asset.tokenId),
+            contract.sealState(asset.tokenId),
+          ])
+          if (!sealed || (asset.sealState !== undefined && state !== asset.sealState)) changed = true
+        } catch {
+          changed = true
+        }
+      }
       const from = listedAt.get(key)
       if (from !== undefined) {
         const latest = await provider.getBlockNumber()

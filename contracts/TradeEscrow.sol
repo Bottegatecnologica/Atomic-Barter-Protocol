@@ -5,6 +5,8 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {ISealable} from "./ISealable.sol";
 
 /// @title TradeEscrow
 /// @notice Two-party atomic swaps of ERC-20 and ERC-721 bundles.
@@ -29,6 +31,8 @@ contract TradeEscrow is ReentrancyGuard {
         uint256 tokenId;
         uint256 amount;
         AssetType assetType;
+        bool sealedContainer;
+        uint256 sealState;
     }
 
     struct Trade {
@@ -89,6 +93,8 @@ contract TradeEscrow is ReentrancyGuard {
     error EmptyOffer(address party);
     error InvalidIndex();
     error FeeOnTransferNotSupported();
+    error ContainerNotSealed();
+    error ContentChanged();
 
     function getTrade(bytes32 tradeId)
         external
@@ -156,11 +162,15 @@ contract TradeEscrow is ReentrancyGuard {
         if (nft.ownerOf(tokenId) != msg.sender) revert NotNftOwner();
         if (!nft.isApprovedForAll(msg.sender, address(this))) revert NftNotApproved();
 
+        (bool sealedContainer, uint256 sealState) = _readSeal(nftContract, tokenId);
+
         items.push(Asset({
             contractAddress: nftContract,
             tokenId: tokenId,
             amount: 1,
-            assetType: AssetType.ERC721
+            assetType: AssetType.ERC721,
+            sealedContainer: sealedContainer,
+            sealState: sealState
         }));
 
         _bumpBundle(trade);
@@ -184,7 +194,9 @@ contract TradeEscrow is ReentrancyGuard {
             contractAddress: tokenContract,
             tokenId: 0,
             amount: amount,
-            assetType: AssetType.ERC20
+            assetType: AssetType.ERC20,
+            sealedContainer: false,
+            sealState: 0
         }));
 
         _bumpBundle(trade);
@@ -260,6 +272,11 @@ contract TradeEscrow is ReentrancyGuard {
 
         _transferAll(_assets[tradeId][initiator], initiator, counterparty);
         _transferAll(_assets[tradeId][counterparty], counterparty, initiator);
+        // A token received during settlement can call back into a container the
+        // seller still holds, or into one that just arrived. Check again after
+        // every leg has moved, before the lists are deleted.
+        _recheckSeals(_assets[tradeId][initiator]);
+        _recheckSeals(_assets[tradeId][counterparty]);
 
         delete _assets[tradeId][initiator];
         delete _assets[tradeId][counterparty];
@@ -272,6 +289,7 @@ contract TradeEscrow is ReentrancyGuard {
         for (uint256 i; i < length;) {
             Asset storage asset = items[i];
             if (asset.assetType == AssetType.ERC721) {
+                _checkSeal(asset);
                 address nftContract = asset.contractAddress;
                 uint256 tokenId = asset.tokenId;
                 IERC721 nft = IERC721(nftContract);
@@ -292,6 +310,35 @@ contract TradeEscrow is ReentrancyGuard {
                 ++i;
             }
         }
+    }
+
+    function _checkSeal(Asset storage asset) internal view {
+        if (!asset.sealedContainer) return;
+        ISealable container = ISealable(asset.contractAddress);
+        if (!container.isSealed(asset.tokenId)) revert ContainerNotSealed();
+        if (container.sealState(asset.tokenId) != asset.sealState) revert ContentChanged();
+    }
+
+    function _recheckSeals(Asset[] storage items) internal view {
+        uint256 length = items.length;
+        for (uint256 i; i < length;) {
+            if (items[i].assetType == AssetType.ERC721) _checkSeal(items[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev `staticcall` so an NFT with no ERC-165 still lists. A container that
+    ///      reports `ISealable` must already be sealed, and its counter is stored.
+    function _readSeal(address nftContract, uint256 tokenId) internal view returns (bool sealedContainer, uint256 state) {
+        (bool ok, bytes memory ret) = nftContract.staticcall(
+            abi.encodeCall(IERC165.supportsInterface, (type(ISealable).interfaceId))
+        );
+        if (!ok || ret.length != 32 || !abi.decode(ret, (bool))) return (false, 0);
+        ISealable container = ISealable(nftContract);
+        if (!container.isSealed(tokenId)) revert ContainerNotSealed();
+        return (true, container.sealState(tokenId));
     }
 
     function _requireParticipant(bytes32 tradeId) internal view returns (Trade storage trade) {

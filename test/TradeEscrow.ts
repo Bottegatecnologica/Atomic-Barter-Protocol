@@ -393,4 +393,123 @@ describe("TradeEscrow", function () {
         .to.be.revertedWithCustomError(escrow, "InvalidDeadline");
     });
   });
+
+  describe("sealed containers", function () {
+    async function sealableTrade() {
+      const { escrow, nft, alice, bob } = await loadFixture(deployFixture);
+      const sealable = await (await hre.ethers.getContractFactory("MockSealable")).deploy();
+      await sealable.mint(alice.address, 7);
+      await sealable.connect(alice).seal(7);
+      await sealable.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(alice).createTrade(bob.address, await openDeadline())
+      );
+      await escrow.connect(alice).addNFT(tradeId, await sealable.getAddress(), 7);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      return { escrow, nft, sealable, alice, bob, tradeId };
+    }
+
+    it("reverts settlement after the box is unsealed and emptied", async function () {
+      const { escrow, sealable, alice, bob, tradeId } = await sealableTrade();
+      await escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
+      await sealable.connect(alice).unseal(7);
+
+      await expect(
+        escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId))
+      ).to.be.revertedWithCustomError(escrow, "ContainerNotSealed");
+      expect(await sealable.ownerOf(7)).to.equal(alice.address);
+    });
+
+    it("reverts when the seal is opened and closed again", async function () {
+      const { escrow, sealable, alice, bob, tradeId } = await sealableTrade();
+      await sealable.connect(alice).unseal(7);
+      await sealable.connect(alice).seal(7);
+      await escrow.connect(bob).approveTrade(tradeId, await bundleVersion(escrow, tradeId));
+
+      await expect(
+        escrow.connect(alice).approveTrade(tradeId, await bundleVersion(escrow, tradeId))
+      ).to.be.revertedWithCustomError(escrow, "ContentChanged");
+    });
+
+    it("reverts when a token arriving at the seller unseals the box during settlement", async function () {
+      const { escrow, bob } = await loadFixture(deployFixture);
+      const sealable = await (await hre.ethers.getContractFactory("MockSealable")).deploy();
+      const arrival = await (await hre.ethers.getContractFactory("ArrivalERC721")).deploy();
+      const seller = await (await hre.ethers.getContractFactory("SellerWallet")).deploy();
+      const sellerAddress = await seller.getAddress();
+      await sealable.mint(sellerAddress, 7);
+      await seller.setBox(await sealable.getAddress(), 7);
+      await seller.sealBox();
+      await seller.approveEscrow(await sealable.getAddress(), await escrow.getAddress());
+      await arrival.mint(bob.address, 1);
+      await arrival.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+
+      // Bob is the initiator, so his token is delivered before the seller's box moves.
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(bob).createTrade(sellerAddress, await openDeadline())
+      );
+      await escrow.connect(bob).addNFT(tradeId, await arrival.getAddress(), 1);
+      await seller.addNFT(await escrow.getAddress(), tradeId, await sealable.getAddress(), 7);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+
+      await expect(seller.approveTrade(await escrow.getAddress(), tradeId, version))
+        .to.be.revertedWithCustomError(escrow, "ContainerNotSealed");
+      expect(await sealable.ownerOf(7)).to.equal(sellerAddress);
+      expect(await arrival.ownerOf(1)).to.equal(bob.address);
+      expect(await sealable.isSealed(7)).to.equal(true);
+    });
+
+    it("settles after the box is transferred away and returned, while the seal is unchanged", async function () {
+      const { escrow, nft, sealable, alice, bob, tradeId } = await sealableTrade();
+      const carol = (await hre.ethers.getSigners())[2];
+      await sealable.connect(alice).transferFrom(alice.address, carol.address, 7);
+      await sealable.connect(carol).transferFrom(carol.address, alice.address, 7);
+      await sealable.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, version);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+      expect(await sealable.ownerOf(7)).to.equal(bob.address);
+      expect(await nft.ownerOf(2)).to.equal(alice.address);
+    });
+
+    it("rolls the trade back when the box is bridged away", async function () {
+      const { escrow, nft, sealable, alice, bob, tradeId } = await sealableTrade();
+      await sealable.connect(alice).park(7);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+
+      await expect(
+        escrow.connect(alice).approveTrade(tradeId, version)
+      ).to.be.reverted;
+      expect(await nft.ownerOf(2)).to.equal(bob.address);
+      expect(await sealable.ownerOf(7)).to.equal(await sealable.getAddress());
+    });
+
+    it("lists a shadow because a shadow is always sealed", async function () {
+      const { escrow, nft, alice, bob } = await loadFixture(deployFixture);
+      const sealable = await (await hre.ethers.getContractFactory("MockSealable")).deploy();
+      await sealable.mint(alice.address, 9);
+      await sealable.markShadow(9);
+      expect(await sealable.isSealed(9)).to.equal(true);
+      await sealable.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(alice).createTrade(bob.address, await openDeadline())
+      );
+      await escrow.connect(alice).addNFT(tradeId, await sealable.getAddress(), 9);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, version);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+      expect(await sealable.ownerOf(9)).to.equal(bob.address);
+      expect(await nft.ownerOf(2)).to.equal(alice.address);
+    });
+  });
 });

@@ -3,7 +3,9 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ISealable} from "../ISealable.sol";
 import {TradeEscrow} from "../TradeEscrow.sol";
 
 contract MockERC20 is ERC20 {
@@ -147,5 +149,104 @@ contract MaliciousParty {
         try escrow.cancelTrade(tradeId) {
             cancelled = true;
         } catch {}
+    }
+}
+
+/// @notice Container NFT used to test the seal check. Not a Schrödinger's Box.
+contract MockSealable is ERC721, ISealable {
+    mapping(uint256 => bool) public shadow;
+    mapping(uint256 => bool) private _sealed;
+    mapping(uint256 => uint256) private _state;
+
+    constructor() ERC721("Sealable", "SEAL") {}
+
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
+    }
+
+    function seal(uint256 tokenId) external {
+        require(ownerOf(tokenId) == msg.sender, "owner");
+        require(!_sealed[tokenId], "sealed");
+        _sealed[tokenId] = true;
+        _state[tokenId] += 1;
+    }
+
+    function unseal(uint256 tokenId) external {
+        require(ownerOf(tokenId) == msg.sender, "owner");
+        require(_sealed[tokenId], "open");
+        _sealed[tokenId] = false;
+        _state[tokenId] += 1;
+    }
+
+    function markShadow(uint256 tokenId) external {
+        shadow[tokenId] = true;
+    }
+
+    /// @dev Moves the token onto this contract, the way a bridge locks an original.
+    function park(uint256 tokenId) external {
+        _transfer(ownerOf(tokenId), address(this), tokenId);
+    }
+
+    function isSealed(uint256 tokenId) public view returns (bool) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        if (shadow[tokenId]) return true;
+        return _sealed[tokenId];
+    }
+
+    function sealState(uint256 tokenId) public view returns (uint256) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return _state[tokenId];
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
+        return interfaceId == type(ISealable).interfaceId || super.supportsInterface(interfaceId);
+    }
+}
+
+/// @notice Tells a contract recipient that the token arrived, even though the escrow uses `transferFrom`.
+contract ArrivalERC721 is ERC721 {
+    constructor() ERC721("Arrival", "ARR") {}
+
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
+    }
+
+    function transferFrom(address from, address to, uint256 tokenId) public override {
+        super.transferFrom(from, to, tokenId);
+        if (to.code.length > 0) {
+            (bool ok,) = to.call(abi.encodeWithSignature("onTokenArrived()"));
+            ok;
+        }
+    }
+}
+
+/// @notice Seller that unseals its container when Bob's token arrives mid-settlement.
+contract SellerWallet {
+    MockSealable public box;
+    uint256 public boxId;
+
+    function setBox(address box_, uint256 id) external {
+        box = MockSealable(box_);
+        boxId = id;
+    }
+
+    function approveEscrow(address nft, address escrow) external {
+        IERC721(nft).setApprovalForAll(escrow, true);
+    }
+
+    function addNFT(address escrow, bytes32 id, address nft, uint256 tokenId) external {
+        TradeEscrow(escrow).addNFT(id, nft, tokenId);
+    }
+
+    function approveTrade(address escrow, bytes32 id, uint256 version) external {
+        TradeEscrow(escrow).approveTrade(id, version);
+    }
+
+    function sealBox() external {
+        box.seal(boxId);
+    }
+
+    function onTokenArrived() external {
+        box.unseal(boxId);
     }
 }

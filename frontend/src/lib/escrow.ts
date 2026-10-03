@@ -1,3 +1,5 @@
+import { Contract, Interface } from "ethers"
+
 export const ESCROW_ABI = [
   "function createTrade(address counterparty, uint256 deadline) returns (bytes32)",
   "function addNFT(bytes32 tradeId, address nftContract, uint256 tokenId)",
@@ -21,6 +23,8 @@ export interface ListedAsset {
   assetType: number
   tokenId: bigint
   amount: bigint
+  sealedContainer?: boolean
+  sealState?: bigint
 }
 
 export interface BundleLog {
@@ -36,6 +40,29 @@ export interface BundleLog {
 }
 
 const ALLOWLIST_KEY = "atomic-barter.allowlist"
+
+const OLD_ASSETS = new Interface([
+  "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType)[])",
+])
+const NEW_ASSETS = new Interface([
+  "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType, bool sealedContainer, uint256 sealState)[])",
+])
+
+export async function readStoredAssets(escrow: Contract, tradeId: string, party: string) {
+  const to = await escrow.getAddress()
+  const data = OLD_ASSETS.encodeFunctionData("getAssets", [tradeId, party])
+  const runner = escrow.runner as { call?: (tx: { to: string; data: string }) => Promise<string>; provider?: { call?: (tx: { to: string; data: string }) => Promise<string> } } | null
+  const call = runner && typeof runner.call === "function"
+    ? runner.call.bind(runner)
+    : runner?.provider?.call?.bind(runner.provider)
+  if (!call) return escrow.getAssets.staticCall(tradeId, party)
+  const raw = await call({ to, data })
+  try {
+    return NEW_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+  } catch {
+    return OLD_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+  }
+}
 
 export function loadAllowlist(): string[] {
   try {

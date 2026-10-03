@@ -1,6 +1,6 @@
 # TradeEscrow security review
 
-Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit report. This is not a third-party audit. The findings below were in the previous version of the contract. Each one is fixed in the current source, and the Hardhat suite has a regression test for it.
+Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit report. This is not an external audit. The findings below were in the previous version of the contract. Each one except the seal check was already fixed. O-01 is fixed in this source by the seal, and the Hardhat suite has a regression test for it. The contracts are for testnet use. Do not treat this file as an audit.
 
 **Scope:** `TradeEscrow` — two-party atomic escrow for ERC-20 and ERC-721 bundles. Assets stay in the owners' wallets until both parties approve; settlement is a single transaction.
 
@@ -19,9 +19,7 @@ Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit repo
 | L-02 | An approval never expires | Low | Fixed |
 | I-01 | OpenZeppelin v4 import path | Info | Fixed |
 | I-02 | Cancelling a trade left its asset arrays in storage | Info | Fixed |
-| O-01 | A listed box can be emptied before settlement | High | Open |
-
-The finding marked **Open** is not fixed in the current source. It is specified below so the next change can implement it. Do not treat this file as an audit.
+| O-01 | A listed box can be emptied before settlement | High | Fixed |
 
 ## H-01 — `transferFrom` return value is ignored
 
@@ -117,54 +115,56 @@ Asset lists lived in a mapping inside the `Trade` struct. Solidity does not clea
 
 **Fix:** asset arrays are stored in a separate mapping. `cancelTrade` deletes both parties' arrays and then the trade record. Settlement deletes the arrays after the transfers, which refunds the storage gas. `getTrade` on a cancelled id reverts with `TradeNotFound`; the cancelled state is not stored separately.
 
-## Open — still to implement
-
-### O-01 — A listed box can be emptied before settlement
+## O-01 — A listed box can be emptied before settlement
 
 **Severity:** High
 
-`TradeEscrow` records an NFT as a contract address and a token id. It does not record what is inside that NFT. Assets stay in the owner's wallet until settlement, so the owner can still call `withdrawERC20` or `withdrawNFT` on a Schrödinger's Box. `bundleVersion` increases when an asset is added to or removed from the trade. It does not increase when the contents of a listed asset change.
+`TradeEscrow` records an NFT as a contract address and a token id. Assets stay in the owner's wallet until settlement, so the owner of a container can change what is inside after listing. `bundleVersion` increases when an asset is added to or removed from the trade. It does not increase when the inside of a listed asset changes.
 
 Exploit:
 
 1. Alice lists box #7 with 1,000 tokens inside. Bob lists his NFT and approves.
-2. Alice withdraws the 1,000 tokens from the box. The escrow still sees the same NFT.
-3. Alice approves. Settlement transfers the empty box to Bob.
+2. Alice withdraws the 1,000 tokens. The escrow still sees the same NFT.
+3. Alice approves. Settlement would transfer the empty box to Bob.
 
-If Bob is the one about to approve, Alice can see that transaction and put a withdrawal ahead of it with a higher gas price. Bridging the box does not have this outcome: the box moves to the box contract, `transferFrom` fails, and the trade rolls back.
+If Bob is the one about to approve, Alice can put the withdrawal ahead of that transaction. Bridging the box does not pay the attacker: the box moves to the box contract, `transferFrom` fails, and the trade rolls back.
 
 This is the same shape as an NFT that represents a Uniswap v3 position: the seller removes the liquidity just before the sale completes.
 
-**To implement, in `SchrodingerBox`:** a counter that increases on every deposit and withdrawal, and ERC-165 so other contracts can recognise it.
+A second path shows up across contracts. Settlement can deliver some other token to Alice's smart wallet before her box moves. That token can call back into the wallet, and the wallet can unseal the box and empty it in the same transaction. Checking the seal only before the box moves is not enough if the callback happens later in the same settlement. The counter is checked again after every leg has moved.
 
-```solidity
-interface IContentVersioned {
-    function contentVersion(uint256 tokenId) external view returns (uint256);
-}
-```
+**Fix:** containers implement `ISealable` (`contracts/ISealable.sol`, `pragma ^0.8.24`), the same interface as Schrödinger's Box. `addNFT` asks `supportsInterface` with `staticcall`. An NFT with no ERC-165 still lists. An NFT that reports the interface must already be sealed, and the escrow stores `sealState`. Before each such NFT is transferred, and again after all transfers, settlement reverts with `ContainerNotSealed` if it is open and `ContentChanged` if the counter moved.
 
-`depositERC20`, `withdrawERC20`, `depositNFT`, and `withdrawNFT` increment `contentVersion[boxId]`. `supportsInterface` returns true for `type(IContentVersioned).interfaceId`.
+Alice has to unseal to change the contents. That changes the counter. She then has to remove the box from the trade and list it again, which bumps `bundleVersion` and clears both approvals.
 
-**To implement, in `TradeEscrow`:** when an NFT is listed, if the contract reports that interface, store the version. At settlement, before the NFT moves, revert with `ContentChanged` if the version is different.
+`test/TradeEscrow.ts` covers an unsealed box, a seal that is opened and closed, a token that unseals the box when it arrives at the seller during settlement, a box that is transferred away and back, a box that is bridged away, and a shadow that is listed because a shadow is always sealed.
 
-The check has to be a `staticcall` to `supportsInterface`. Many NFTs do not implement ERC-165, and `addNFT` must still accept those. The check is not special to Schrödinger's Box. Any container NFT that exposes the same interface gets it.
+The site shows the box contents and keeps Accept off when it can see that the seal no longer matches, or that a deposit or withdrawal landed after listing. That warning is not a substitute for the settlement check.
 
-After this, a change inside the box fails settlement. Bob does not lose his side of the trade. Alice has to remove the box from the trade and list it again, which bumps `bundleVersion` and clears both approvals, so Bob has to look again and approve again.
+## Trust model
 
-Add a test in `test/TradeEscrow.ts` that runs the withdrawal above and expects `ContentChanged`.
+There is no owner, no pause, and no upgrade. A bad version is replaced by deploying a new address. The two parties are the only accounts that can list, approve, or cancel. Settlement moves the assets they already approved, or it reverts.
 
-Until that code exists, the wallet shows the box contents next to the NFT and refuses the accept button when a deposit or withdrawal landed after the box was listed. That warning is not a substitute for the settlement check. A user who skips the wallet can still settle an emptied box.
+## Notes for integrators
+
+- A container NFT is safe inside a trade only if it implements `ISealable` and the holder seals it before listing. Containers that do not, including an ERC-6551 account that does not expose `sealState` (or the older `state()` shape this escrow does not read), can still be emptied by their owner.
+- Settlement uses ERC-721 `transferFrom`. That call does not ask the recipient to support ERC-721, so an NFT can be delivered to a contract that has no way to send it back.
+- The list of tokens the site treats as known is stored in `localStorage`. It applies only in that browser.
+
+## Reporting a vulnerability
+
+Use Private vulnerability reporting on this GitHub repository (Settings, Security). Do not open a public issue for a problem that can move assets.
 
 ## Residual risk
 
 These are accepted properties of the current design, not open findings.
 
-- A token the user chose to list can still lie. If `balanceOf` increases by `amount` without a real economic transfer, or `ownerOf` reports the recipient after a no-op, the checks pass. The escrow cannot tell a dishonest token from a normal one. The wallet UI has to warn on contracts it does not know, or only offer an allowlist. The on-chain checks stop an honest fee, a `false` return, and a no-op that leaves balances unchanged.
+- A token the user chose to list can still lie. If `balanceOf` increases by `amount` without a real economic transfer, or `ownerOf` reports the recipient after a no-op, the checks pass. The escrow cannot tell a dishonest token from a normal one. The site warns on contracts it does not know. The on-chain checks stop an honest fee, a `false` return, and a no-op that leaves balances unchanged.
+- Container NFTs that do not implement `ISealable` can still be emptied after they are listed. The escrow does not try to guess which NFTs are containers.
 - Listing an NFT requires `setApprovalForAll`. A one-token `approve` is not enough to list.
-- Settlement uses ERC-721 `transferFrom`. That call does not ask the recipient to support ERC-721, so an NFT can be delivered to a contract that has no way to send it back. Review the counterparty address before approving.
+- Settlement uses ERC-721 `transferFrom`. An NFT can be delivered to a contract that cannot send it back.
 - ETH is not an asset of this escrow. The contract does not receive ether and does not refund it, so there is no `address.transfer` path.
-- There is no admin, pause, or upgrade. A bad version is replaced by deploying a new address.
-- No deployment in this repository is verified on an explorer. Addresses will be added to the README when one is.
+- The Sepolia escrow the site uses is `0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5`, deployed 3 October 2026 from the source in this repository. It checks `ISealable` before listing and again after both sides have transferred. The explorer does not show that address as verified yet. The previous escrow `0x11dFdDDF9393F01d73c85c50245f5A979209B656` does not include the seal check.
 
 ## Tests
 
@@ -177,5 +177,11 @@ These are accepted properties of the current design, not open findings.
 | Cap, removal, approval reset, one-sided offer | `test/TradeEscrow.ts` |
 | Stale bundle version does not settle the replacement offer | `test/TradeEscrow.ts` |
 | Deadline blocks a late approval; cancel still works | `test/TradeEscrow.ts` |
+| O-01 unsealed box reverts with ContainerNotSealed | `test/TradeEscrow.ts` |
+| O-01 seal opened and closed reverts with ContentChanged | `test/TradeEscrow.ts` |
+| O-01 token arriving at the seller unseals the box | `test/TradeEscrow.ts` |
+| Box transferred away and back still settles | `test/TradeEscrow.ts` |
+| Bridged box rolls the trade back | `test/TradeEscrow.ts` |
+| A shadow can be listed because it is always sealed | `test/TradeEscrow.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |

@@ -8,6 +8,7 @@ import {
   bundleFromLogs,
   isAllowlisted,
   loadAllowlist,
+  readStoredAssets,
   saveAllowlist,
   type BundleLog,
   type ListedAsset,
@@ -93,8 +94,8 @@ async function readSettledBundle(escrow: Contract, tradeId: string) {
 
 async function storedBundle(escrow: Contract, id: string, view: TradeView) {
   const [left, right] = await Promise.all([
-    escrow.getAssets(id, view.initiator),
-    escrow.getAssets(id, view.counterparty),
+    readStoredAssets(escrow, id, view.initiator),
+    readStoredAssets(escrow, id, view.counterparty),
   ])
   const lists = new Map<string, ListedAsset[]>()
   lists.set(view.initiator.toLowerCase(), mapStoredAssets(view.initiator, left))
@@ -115,13 +116,15 @@ async function listingBlocks(escrow: Contract, id: string) {
   return blocks
 }
 
-function mapStoredAssets(owner: string, rows: Array<{ contractAddress: string; tokenId: bigint; amount: bigint; assetType: number }>) {
+function mapStoredAssets(owner: string, rows: Array<{ contractAddress: string; tokenId: bigint; amount: bigint; assetType: number; sealedContainer?: boolean; sealState?: bigint }>) {
   return rows.map((row) => ({
     owner,
     contractAddress: row.contractAddress,
     tokenId: row.tokenId,
     amount: row.amount,
     assetType: Number(row.assetType),
+    sealedContainer: row.sealedContainer,
+    sealState: row.sealState,
   }))
 }
 
@@ -694,7 +697,7 @@ export function TradeInterface() {
 
             {contentChanged && (
               <p className="mt-4 rounded-xl border border-amber-300/40 bg-amber-400/15 p-3 text-sm text-amber-50">
-                The contents of a box in this trade changed after it was listed. Accept stays off. Remove that box and list it again.
+                The contents of a box in this trade changed after it was listed, or the box is no longer sealed. Accept stays off. Remove that box and list it again.
               </p>
             )}
 
@@ -888,7 +891,7 @@ function AssetColumn({
                     </p>
                   )}
                   {inside?.changed && (
-                    <p className="mt-1 text-xs font-medium text-amber-200">The contents of this box changed after it was listed.</p>
+                    <p className="mt-1 text-xs font-medium text-amber-200">The contents of this box changed after it was listed, or it is no longer sealed.</p>
                   )}
                   {inside?.unread && (
                     <p className="mt-1 text-xs text-amber-200">Could not check whether this box changed after it was listed.</p>
