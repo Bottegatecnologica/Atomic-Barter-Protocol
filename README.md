@@ -226,7 +226,7 @@ Sepolia deployment. The test ERC-20 and test NFT have an open `mint`, so the fro
 
 | Network | Contract | Address | Explorer |
 |---------|----------|---------|----------|
-| Sepolia | TradeEscrow | `0xFc58343cb7458b4eF8a6D41E532BD49386d04189` | [view](https://sepolia.etherscan.io/address/0xFc58343cb7458b4eF8a6D41E532BD49386d04189) |
+| Sepolia | TradeEscrow | `0x3a6fd6D1b400A3a9Fd533cB2E594a701FCF3F48E` | [view](https://sepolia.etherscan.io/address/0x3a6fd6D1b400A3a9Fd533cB2E594a701FCF3F48E) |
 | Sepolia | Test ERC-20 | `0xf0977881b567A4bb4B10eF52f1D088B36E120b24` | [view](https://sepolia.etherscan.io/address/0xf0977881b567A4bb4B10eF52f1D088B36E120b24) |
 | Sepolia | Test NFT | `0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f` | [view](https://sepolia.etherscan.io/address/0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f) |
 

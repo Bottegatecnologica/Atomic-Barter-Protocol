@@ -153,7 +153,7 @@ The site shows the box contents and keeps Accept off when it can see that the se
 
 `readBoxInsides` used to read one level, and the escrow stored only the outer box's `sealState`. A nested box cannot change while it is inside (SchrodingerBox SB-11), but the counterparty was approving without seeing the inner holdings, and a change that kept the same seal counter was not bound.
 
-**Fix:** `ISealable.contentHash(uint256)` returns a hash of the asset list. For each NFT in that list that is this box, the hash includes the inner hash, up to four levels. An external `ISealable` is included with `staticcall`, or zero if that call fails. `addNFT` stores the hash. Settlement reverts with `ContentChanged` if it differs. The site reads the same tree, with a depth limit of four and a set that stops cycles.
+**Fix:** `ISealable.contentHash(uint256)` returns a hash of the asset list. `seal` stores that hash. While the box is sealed the function returns the stored word, so the read does not walk the list again. Nested boxes of the same contract are included up to four levels. An external `ISealable` is included with `staticcall`. If that contract claims the interface and the hash call fails, `seal` reverts `ExternalHashFailed` instead of treating the contents as empty. `addNFT` stores the hash. Settlement reverts with `ContentChanged` if it differs, and with `SealReadFailed` if the read itself fails. The site reads the same tree, with a depth limit of four and a set that stops cycles.
 
 ## AB-02 — Truncated addresses and raw amounts allow token spoofing
 
@@ -221,7 +221,9 @@ Escrows already on Sepolia have no owner and cannot be upgraded. An `setApproval
 
 **Severity:** Low
 
-**Fix:** every seal read in the escrow, and both external hash reads in the box, is a `staticcall` capped at 50,000 gas. A call that does not finish fails closed in the escrow and contributes a zero hash inside a box.
+**Fix:** `supportsInterface`, `isSealed`, and `sealState` stay on a 50,000 gas `staticcall`. `contentHash` has its own cap of 500,000, which covers a stored hash plus the eight external reads a box may still do. A call that does not return reverts with `SealReadFailed`. A returned hash that differs from the one stored at listing reverts with `ContentChanged`.
+
+A sealed Schrödinger box does not walk its asset list on that read. `seal` stores the hash, and `contentHash` returns the stored word. Assets inside the box cannot change while it is sealed. Up to eight external containers are read again, live, because those can. A full box of 20 tokens and 20 NFTs, and a box nested four levels deep, are covered by `test/TradeEscrow.ts`.
 
 ## Trust model
 
@@ -248,7 +250,7 @@ These are accepted properties of the current design, not open findings.
 - Listing an NFT accepts either `setApprovalForAll` or `approve` for that token id. The site uses the single-token approval and offers to revoke it after the trade settles or is cancelled. An approval that is left in place still lets this escrow move that token.
 - Settlement uses ERC-721 `transferFrom`. An NFT can be delivered to a contract that cannot send it back.
 - ETH is not an asset of this escrow. The contract does not receive ether and does not refund it, so there is no `address.transfer` path.
-- The Sepolia escrow the site uses is `0xFc58343cb7458b4eF8a6D41E532BD49386d04189`, deployed from the source in this repository. It rejects a legacy seal interface, checks `ISealable` seal state and `contentHash` with a 50,000 gas cap, and it rejects a deadline more than 30 days out. The explorer does not show that address as verified yet: this environment has no Etherscan API key.
+- The Sepolia escrow the site uses is `0x3a6fd6D1b400A3a9Fd533cB2E594a701FCF3F48E`, deployed from the source in this repository. It stores a sealed box's `contentHash` as one word, reads that hash with a 500,000 gas cap, and uses `SealReadFailed` when the read itself fails. It rejects a legacy seal interface and a deadline more than 30 days out. The explorer does not show that address as verified yet: this environment has no Etherscan API key.
 
 ## Previous deployments
 
@@ -259,6 +261,7 @@ These contracts are still on Sepolia. Revoke any collection approval given to an
 | TradeEscrow | `0x11dFdDDF9393F01d73c85c50245f5A979209B656` | No seal check. |
 | TradeEscrow | `0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5` | No `contentHash`, no 30-day deadline cap. |
 | TradeEscrow | `0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b` | No `LegacyContainer` reject, no gas cap, `AssetAdded` omits the seal. |
+| TradeEscrow | `0xFc58343cb7458b4eF8a6D41E532BD49386d04189` | `contentHash` is capped at 50,000 gas, so a box with more than about four assets cannot be listed. |
 
 ## Tests
 
@@ -283,6 +286,8 @@ These contracts are still on Sepolia. Revoke any collection approval given to an
 | Self-deposit reverts with SelfDeposit | `test/SchrodingerBox.audit-poc.test.ts` |
 | A pre-contentHash box reverts with LegacyContainer | `test/TradeEscrow.legacy-box.poc.ts` |
 | Content hash change with a stable seal counter reverts | `test/TradeEscrow.ts` |
+| A full sealed box and a four-level nest both list and settle | `test/TradeEscrow.ts` |
+| A content-hash read that does not return reverts with SealReadFailed | `test/TradeEscrow.ts` |
 | Inner box cannot be touched while nested | `test/SchrodingerBox.audit-poc.test.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |

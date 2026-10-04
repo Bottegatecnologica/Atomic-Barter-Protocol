@@ -252,6 +252,79 @@ contract HashDriftSealable is ERC721, ISealable {
     }
 }
 
+/// @notice Measures the gas a call actually consumes, without the 21_000 transaction base.
+contract CallGasMeter {
+    function used(address target, bytes calldata data) external view returns (uint256 gas) {
+        uint256 start = gasleft();
+        (bool ok,) = target.staticcall(data);
+        gas = start - gasleft();
+        require(ok, "call failed");
+    }
+}
+
+/// @notice Sealable whose `contentHash` never finishes inside a capped call.
+contract GasHeavySealable is ERC721, ISealable {
+    constructor() ERC721("Heavy", "HVY") {}
+
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
+    }
+
+    function isSealed(uint256 tokenId) public view returns (bool) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return true;
+    }
+
+    function sealState(uint256) public pure returns (uint256) {
+        return 1;
+    }
+
+    function contentHash(uint256 tokenId) public pure returns (bytes32) {
+        uint256 n = tokenId;
+        for (uint256 i = 0; i < 100_000; ++i) {
+            n = uint256(keccak256(abi.encode(n, i)));
+        }
+        return bytes32(n);
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
+        return interfaceId == type(ISealable).interfaceId || super.supportsInterface(interfaceId);
+    }
+}
+
+/// @notice External container whose hash can move while another contract holds the token.
+contract ExternalDrift is ERC721, ISealable {
+    mapping(uint256 => bytes32) private _extra;
+
+    constructor() ERC721("External", "EXT") {}
+
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
+    }
+
+    function poke(uint256 tokenId, bytes32 extra) external {
+        _extra[tokenId] = extra;
+    }
+
+    function isSealed(uint256 tokenId) public view returns (bool) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return true;
+    }
+
+    function sealState(uint256) public pure returns (uint256) {
+        return 1;
+    }
+
+    function contentHash(uint256 tokenId) public view returns (bytes32) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return keccak256(abi.encode(tokenId, _extra[tokenId]));
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
+        return interfaceId == type(ISealable).interfaceId || super.supportsInterface(interfaceId);
+    }
+}
+
 /// @notice Tells a contract recipient that the token arrived, even though the escrow uses `transferFrom`.
 contract ArrivalERC721 is ERC721 {
     constructor() ERC721("Arrival", "ARR") {}

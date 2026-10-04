@@ -55,6 +55,13 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
 
     /// @dev Caps each kind so a deposit loop cannot be grown without bound.
     uint256 public constant MAX_ASSETS = 20;
+
+    /// @dev External containers re-read while a box is sealed. Nested boxes of this
+    ///      contract are not counted: their contents cannot change while held here.
+    uint256 public constant MAX_EXTERNAL_SEALS = 8;
+
+    /// @dev Caps a hostile `contentHash`. A sealed box of this contract is one storage read.
+    uint256 private constant EXTERNAL_HASH_GAS = 50_000;
     uint8 public constant ASSET_ERC20 = 0;
     uint8 public constant ASSET_ERC721 = 1;
 
@@ -98,12 +105,19 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     /// @dev Set by `freezeConfig`. After that, trusted peers cannot be replaced.
     bool public configFrozen;
 
+    struct ExternalSeal {
+        address nft;
+        uint256 tokenId;
+    }
+
     struct Seal {
         bool closed;
         uint256 state;
+        bytes32 contentHash;
     }
 
     mapping(uint256 => Seal) private _seals;
+    mapping(uint256 => ExternalSeal[]) private _externalSeals;
 
     // Events
     event BoxMinted(address indexed owner, uint256 indexed boxId);
@@ -149,6 +163,8 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     error NotSealed();
     error NonceMismatch();
     error SelfDeposit();
+    error ExternalHashFailed();
+    error TooManyExternalSeals();
 
     constructor(
         address _wormholeRelayer,
@@ -203,11 +219,17 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         emit ConfigFrozenSet();
     }
 
-    /// @notice Closes the box. Deposits and withdrawals revert until `unseal`.
+    /// @notice Closes the box and stores `contentHash`. Deposits and withdrawals revert until `unseal`.
+    /// @dev The stored hash is what `contentHash` returns while the box is sealed, so a later
+    ///      read does not walk the asset list. External containers are the exception: up to
+    ///      `MAX_EXTERNAL_SEALS` of them are read again on each call.
     function seal(uint256 boxId) external {
         _requireOpenOriginal(boxId);
         Seal storage sealInfo = _seals[boxId];
         if (sealInfo.closed) revert AlreadySealed();
+        delete _externalSeals[boxId];
+        _recordExternalSeals(boxId, boxId, 0);
+        sealInfo.contentHash = _contentHash(boxId, 0);
         sealInfo.closed = true;
         sealInfo.state += 1;
         emit Sealed(boxId, sealInfo.state);
@@ -219,6 +241,8 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         _requireOpenOriginal(boxId);
         Seal storage sealInfo = _seals[boxId];
         if (!sealInfo.closed) revert NotSealed();
+        delete _externalSeals[boxId];
+        sealInfo.contentHash = bytes32(0);
         sealInfo.closed = false;
         sealInfo.state += 1;
         emit Unsealed(boxId, sealInfo.state);
@@ -239,9 +263,18 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     }
 
     /// @inheritdoc ISealable
+    /// @dev A sealed original, and every shadow, returns the hash stored when the list was frozen.
+    ///      An open original still walks the list, because that list can still change.
     function contentHash(uint256 tokenId) public view returns (bytes32) {
         _requireOwned(tokenId);
-        return _contentHash(tokenId, 0);
+        if (!_hashFrozen(tokenId)) return _contentHash(tokenId, 0);
+        bytes32 hash = _seals[tokenId].contentHash;
+        ExternalSeal[] storage extra = _externalSeals[tokenId];
+        uint256 n = extra.length;
+        for (uint256 i = 0; i < n; i++) {
+            hash = keccak256(abi.encode(hash, _readExternalHash(extra[i].nft, extra[i].tokenId)));
+        }
+        return hash;
     }
 
     function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
@@ -564,6 +597,8 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             for (uint256 i = 0; i < boxData.assets.length; i++) {
                 shadow.assets.push(boxData.assets[i]);
             }
+            _seals[localId].contentHash = _contentHash(localId, 0);
+            _recordExternalSeals(localId, localId, 0);
             // `_mint`, not `_safeMint`. A contract receiver with no `onERC721Received`
             // must not revert delivery, or the original stays locked with no exit.
             _mint(receiver, localId);
@@ -664,6 +699,29 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         return false;
     }
 
+    function _hashFrozen(uint256 tokenId) internal view returns (bool) {
+        if (!boxes[tokenId].isOriginal) return true;
+        return _seals[tokenId].closed;
+    }
+
+    /// @dev Writes the external containers whose hash must stay live. Nested boxes of this
+    ///      contract are walked, not recorded: holding them freezes their own list.
+    function _recordExternalSeals(uint256 rootId, uint256 tokenId, uint256 depth) internal {
+        if (depth >= 4) return;
+        Asset[] storage assets = boxes[tokenId].assets;
+        uint256 length = assets.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (assets[i].assetType != ASSET_ERC721) continue;
+            address nft = assets[i].contractAddress;
+            if (nft == address(this)) {
+                _recordExternalSeals(rootId, assets[i].tokenId, depth + 1);
+            } else if (_reportsSealable(nft)) {
+                if (_externalSeals[rootId].length >= MAX_EXTERNAL_SEALS) revert TooManyExternalSeals();
+                _externalSeals[rootId].push(ExternalSeal({nft: nft, tokenId: assets[i].tokenId}));
+            }
+        }
+    }
+
     function _contentHash(uint256 tokenId, uint256 depth) internal view returns (bytes32) {
         if (depth >= 4) return bytes32(0);
         Asset[] storage assets = boxes[tokenId].assets;
@@ -671,10 +729,12 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         for (uint256 i = 0; i < assets.length; i++) {
             bytes32 child;
             if (assets[i].assetType == ASSET_ERC721) {
-                if (assets[i].contractAddress == address(this)) {
-                    child = _contentHash(assets[i].tokenId, depth + 1);
+                address nft = assets[i].contractAddress;
+                uint256 nestedId = assets[i].tokenId;
+                if (nft == address(this)) {
+                    child = _hashFrozen(nestedId) ? contentHash(nestedId) : _contentHash(nestedId, depth + 1);
                 } else {
-                    child = _externalContentHash(assets[i].contractAddress, assets[i].tokenId);
+                    child = _externalContentHash(nft, nestedId);
                 }
             }
             parts[i] = keccak256(abi.encode(
@@ -688,15 +748,25 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         return keccak256(abi.encode(chainId, tokenId, parts));
     }
 
-    function _externalContentHash(address nft, uint256 tokenId) internal view returns (bytes32) {
-        (bool supported, bytes memory data) = nft.staticcall{gas: 50_000}(
+    function _reportsSealable(address nft) internal view returns (bool) {
+        (bool supported, bytes memory data) = nft.staticcall{gas: EXTERNAL_HASH_GAS}(
             abi.encodeCall(IERC165.supportsInterface, (type(ISealable).interfaceId))
         );
-        if (!supported || data.length < 32 || !abi.decode(data, (bool))) return bytes32(0);
-        (bool hashed, bytes memory hashData) = nft.staticcall{gas: 50_000}(
+        return supported && data.length >= 32 && abi.decode(data, (bool));
+    }
+
+    /// @dev A plain NFT contributes zero. A contract that claims `ISealable` but does not
+    ///      return a hash reverts, so the missing contents are not silently unbound.
+    function _externalContentHash(address nft, uint256 tokenId) internal view returns (bytes32) {
+        if (!_reportsSealable(nft)) return bytes32(0);
+        return _readExternalHash(nft, tokenId);
+    }
+
+    function _readExternalHash(address nft, uint256 tokenId) internal view returns (bytes32) {
+        (bool hashed, bytes memory hashData) = nft.staticcall{gas: EXTERNAL_HASH_GAS}(
             abi.encodeCall(ISealable.contentHash, (tokenId))
         );
-        if (!hashed || hashData.length < 32) return bytes32(0);
+        if (!hashed || hashData.length < 32) revert ExternalHashFailed();
         return abi.decode(hashData, (bytes32));
     }
 

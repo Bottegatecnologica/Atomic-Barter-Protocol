@@ -637,5 +637,124 @@ describe("TradeEscrow", function () {
       expect(await nft.ownerOf(2)).to.equal(bob.address);
       await expect(box.ownerOf(1)).to.be.revertedWithCustomError(box, "ERC721NonexistentToken");
     });
+
+    async function contentHashGas(box: { interface: { encodeFunctionData: (name: string, args: unknown[]) => string }; getAddress: () => Promise<string> }, tokenId: number) {
+      const meter = await (await hre.ethers.getContractFactory("CallGasMeter")).deploy();
+      const data = box.interface.encodeFunctionData("contentHash", [tokenId]);
+      return meter.used(await box.getAddress(), data) as Promise<bigint>;
+    }
+
+    async function tradeWith(escrow: any, alice: any, bob: any) {
+      return readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
+    }
+
+    it("lists and settles a sealed box holding 20 tokens and 20 NFTs", async function () {
+      this.timeout(120_000);
+      const { escrow, nft, box, alice, bob } = await realBox();
+      const boxAddress = await box.getAddress();
+      await box.connect(alice).mintBox();
+      await nft.connect(alice).setApprovalForAll(boxAddress, true);
+      for (let i = 0; i < 20; i++) {
+        const token = await (await hre.ethers.getContractFactory("MockERC20")).deploy();
+        await token.mint(alice.address, 1_000n);
+        await token.connect(alice).approve(boxAddress, 1_000n);
+        await box.connect(alice).depositERC20(1, await token.getAddress(), 1_000n);
+        const tokenId = 100 + i;
+        await nft.mint(alice.address, tokenId);
+        await box.connect(alice).depositNFT(1, await nft.getAddress(), tokenId);
+      }
+      await box.connect(alice).seal(1);
+      expect(await contentHashGas(box, 1)).to.be.lessThan(50_000n);
+
+      await box.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+      const tradeId = await tradeWith(escrow, alice, bob);
+      await escrow.connect(alice).addNFT(tradeId, boxAddress, 1);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, version);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+
+      expect(await box.ownerOf(1)).to.equal(bob.address);
+      expect(await box.isSealed(1)).to.equal(true);
+    });
+
+    it("lists and settles a box nested four levels deep", async function () {
+      const { escrow, nft, box, alice, bob } = await realBox();
+      const boxAddress = await box.getAddress();
+      for (let i = 0; i < 4; i++) await box.connect(alice).mintBox();
+      const token = await (await hre.ethers.getContractFactory("MockERC20")).deploy();
+      await token.mint(alice.address, 1n);
+      await token.connect(alice).approve(boxAddress, 1n);
+      await box.connect(alice).depositERC20(4, await token.getAddress(), 1n);
+      await box.connect(alice).setApprovalForAll(boxAddress, true);
+      await box.connect(alice).seal(4);
+      await box.connect(alice).depositNFT(3, boxAddress, 4);
+      await box.connect(alice).seal(3);
+      await box.connect(alice).depositNFT(2, boxAddress, 3);
+      await box.connect(alice).seal(2);
+      await box.connect(alice).depositNFT(1, boxAddress, 2);
+      await box.connect(alice).seal(1);
+      expect(await contentHashGas(box, 1)).to.be.lessThan(50_000n);
+
+      await box.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+      const tradeId = await tradeWith(escrow, alice, bob);
+      await escrow.connect(alice).addNFT(tradeId, boxAddress, 1);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(alice).approveTrade(tradeId, version);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+
+      expect(await box.ownerOf(1)).to.equal(bob.address);
+      expect(await token.balanceOf(boxAddress)).to.equal(1n);
+    });
+
+    it("reverts with SealReadFailed when contentHash does not return", async function () {
+      const { escrow, alice, bob } = await loadFixture(deployFixture);
+      const heavy = await (await hre.ethers.getContractFactory("GasHeavySealable")).deploy();
+      await heavy.mint(alice.address, 1);
+      await heavy.connect(alice).approve(await escrow.getAddress(), 1);
+      const tradeId = await tradeWith(escrow, alice, bob);
+      await expect(escrow.connect(alice).addNFT(tradeId, await heavy.getAddress(), 1))
+        .to.be.revertedWithCustomError(escrow, "SealReadFailed");
+    });
+
+    it("reverts with ContentChanged when a container inside the sealed box changes", async function () {
+      const { escrow, nft, box, alice, bob } = await realBox();
+      const drift = await (await hre.ethers.getContractFactory("ExternalDrift")).deploy();
+      await drift.mint(alice.address, 7);
+      await box.connect(alice).mintBox();
+      const boxAddress = await box.getAddress();
+      await drift.connect(alice).setApprovalForAll(boxAddress, true);
+      await box.connect(alice).depositNFT(1, await drift.getAddress(), 7);
+      await box.connect(alice).seal(1);
+      const before = await box.contentHash(1);
+
+      await box.connect(alice).setApprovalForAll(await escrow.getAddress(), true);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+      const tradeId = await tradeWith(escrow, alice, bob);
+      await escrow.connect(alice).addNFT(tradeId, boxAddress, 1);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+      await drift.poke(7, hre.ethers.id("moved"));
+
+      expect(await box.contentHash(1)).to.not.equal(before);
+      await expect(escrow.connect(alice).approveTrade(tradeId, version))
+        .to.be.revertedWithCustomError(escrow, "ContentChanged");
+      expect(await box.ownerOf(1)).to.equal(alice.address);
+    });
+
+    it("refuses to seal a box around a container whose content hash does not return", async function () {
+      const { box, alice } = await realBox();
+      const heavy = await (await hre.ethers.getContractFactory("GasHeavySealable")).deploy();
+      await heavy.mint(alice.address, 1);
+      await box.connect(alice).mintBox();
+      const boxAddress = await box.getAddress();
+      await heavy.connect(alice).setApprovalForAll(boxAddress, true);
+      await box.connect(alice).depositNFT(1, await heavy.getAddress(), 1);
+      await expect(box.connect(alice).seal(1)).to.be.revertedWithCustomError(box, "ExternalHashFailed");
+    });
   });
 });

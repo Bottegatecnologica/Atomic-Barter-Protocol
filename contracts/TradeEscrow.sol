@@ -25,8 +25,13 @@ contract TradeEscrow is ReentrancyGuard {
     /// @dev An approval cannot stay valid forever. Thirty days is the longest open trade.
     uint256 public constant MAX_TRADE_DURATION = 30 days;
 
-    /// @dev A hostile container cannot spend the caller's whole gas stipend.
+    /// @dev `supportsInterface`, `isSealed`, and `sealState` are cheap and bounded.
     uint256 private constant SEAL_CALL_GAS = 50_000;
+
+    /// @dev `contentHash` on a sealed box is one stored word plus at most eight external reads.
+    ///      Each of those reads is itself capped. 500_000 leaves room for that, and for the
+    ///      63/64 rule, without handing the call the rest of the settlement stipend.
+    uint256 private constant CONTENT_HASH_GAS = 500_000;
 
     enum AssetType {
         ERC20,
@@ -106,6 +111,7 @@ contract TradeEscrow is ReentrancyGuard {
     error ContainerNotSealed();
     error ContentChanged();
     error LegacyContainer();
+    error SealReadFailed();
 
     function getTrade(bytes32 tradeId)
         external
@@ -331,9 +337,13 @@ contract TradeEscrow is ReentrancyGuard {
         address container = asset.contractAddress;
         if (!_staticBool(container, abi.encodeCall(ISealable.isSealed, (asset.tokenId)))) revert ContainerNotSealed();
         (bool stateOk, uint256 state) = _staticUint(container, abi.encodeCall(ISealable.sealState, (asset.tokenId)));
-        if (!stateOk || state != asset.sealState) revert ContentChanged();
-        (bool hashOk, bytes32 hash) = _staticBytes32(container, abi.encodeCall(ISealable.contentHash, (asset.tokenId)));
-        if (!hashOk || hash != asset.contentHash) revert ContentChanged();
+        if (!stateOk) revert SealReadFailed();
+        if (state != asset.sealState) revert ContentChanged();
+        (bool hashOk, bytes32 hash) = _staticBytes32(
+            container, abi.encodeCall(ISealable.contentHash, (asset.tokenId)), CONTENT_HASH_GAS
+        );
+        if (!hashOk) revert SealReadFailed();
+        if (hash != asset.contentHash) revert ContentChanged();
     }
 
     function _recheckSeals(Asset[] storage items) internal view {
@@ -357,10 +367,10 @@ contract TradeEscrow is ReentrancyGuard {
         if (!_staticBool(nftContract, abi.encodeCall(ISealable.isSealed, (tokenId)))) revert ContainerNotSealed();
         bool stateOk;
         (stateOk, state) = _staticUint(nftContract, abi.encodeCall(ISealable.sealState, (tokenId)));
-        if (!stateOk) revert ContentChanged();
+        if (!stateOk) revert SealReadFailed();
         bool hashOk;
-        (hashOk, hash) = _staticBytes32(nftContract, abi.encodeCall(ISealable.contentHash, (tokenId)));
-        if (!hashOk) revert ContentChanged();
+        (hashOk, hash) = _staticBytes32(nftContract, abi.encodeCall(ISealable.contentHash, (tokenId)), CONTENT_HASH_GAS);
+        if (!hashOk) revert SealReadFailed();
         return (true, state, hash);
     }
 
@@ -376,9 +386,9 @@ contract TradeEscrow is ReentrancyGuard {
         return (true, abi.decode(ret, (uint256)));
     }
 
-    function _staticBytes32(address target, bytes memory data) internal view returns (bool ok, bytes32 value) {
+    function _staticBytes32(address target, bytes memory data, uint256 gasLimit) internal view returns (bool ok, bytes32 value) {
         bytes memory ret;
-        (ok, ret) = target.staticcall{gas: SEAL_CALL_GAS}(data);
+        (ok, ret) = target.staticcall{gas: gasLimit}(data);
         if (!ok || ret.length < 32) return (false, bytes32(0));
         return (true, abi.decode(ret, (bytes32)));
     }
