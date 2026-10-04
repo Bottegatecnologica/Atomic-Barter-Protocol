@@ -72,12 +72,15 @@ describe("TradeEscrow", function () {
     });
 
     it("rejects a missing counterparty and a self-trade", async function () {
-      const { escrow, alice } = await loadFixture(deployFixture);
+      const { escrow, alice, bob } = await loadFixture(deployFixture);
 
       await expect(escrow.connect(alice).createTrade(hre.ethers.ZeroAddress, await openDeadline()))
         .to.be.revertedWithCustomError(escrow, "InvalidCounterparty");
       await expect(escrow.connect(alice).createTrade(alice.address, await openDeadline()))
         .to.be.revertedWithCustomError(escrow, "SelfTrade");
+      const tooFar = (await time.latest()) + 30 * 24 * 60 * 60 + 60;
+      await expect(escrow.connect(alice).createTrade(bob.address, tooFar))
+        .to.be.revertedWithCustomError(escrow, "InvalidDeadline");
     });
   });
 
@@ -99,6 +102,14 @@ describe("TradeEscrow", function () {
       await approveStandardAssets(ctx);
       await expect(escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 2))
         .to.be.revertedWithCustomError(escrow, "NotNftOwner");
+    });
+
+    it("accepts a single-token approval", async function () {
+      const { escrow, nft, alice, bob } = await loadFixture(deployFixture);
+      const tradeId = await readTradeId(escrow, await escrow.connect(alice).createTrade(bob.address, await openDeadline()));
+      await nft.connect(alice).approve(await escrow.getAddress(), 1);
+      await expect(escrow.connect(alice).addNFT(tradeId, await nft.getAddress(), 1))
+        .to.emit(escrow, "AssetAdded");
     });
 
     it("rejects a duplicate NFT and sums ERC-20 allowances", async function () {
@@ -596,7 +607,7 @@ describe("TradeEscrow", function () {
       await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
       const version = await bundleVersion(escrow, tradeId);
       await escrow.connect(bob).approveTrade(tradeId, version);
-      await box.connect(alice).returnShadowBox(1);
+      await box.connect(alice).returnShadowBox(1, alice.address);
 
       await expect(escrow.connect(alice).approveTrade(tradeId, version))
         .to.be.revertedWithCustomError(box, "ERC721NonexistentToken");

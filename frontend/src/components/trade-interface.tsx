@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react"
-import { BrowserProvider, Contract, EventLog, isAddress, type Eip1193Provider } from "ethers"
+import { BrowserProvider, Contract, EventLog, ZeroAddress, isAddress, type Eip1193Provider } from "ethers"
 import { SepoliaBanner } from "./sepolia-banner"
 import { TradeForms } from "./trade-forms"
 import { TradeList } from "./trade-list"
@@ -29,7 +29,7 @@ import {
   isSepoliaTestAsset,
 } from "../lib/sepolia"
 import { loadShelf, loadTrades, type KnownTrade, type Shelf } from "../lib/shelf"
-import { boxKey, isSchrodingerBox, readBoxInsides, type BoxInside } from "../lib/box"
+import { boxKey, isSchrodingerBox, labelAssets, readBoxInsides, type AssetFace, type BoxInside } from "../lib/box"
 
 interface TradeView {
   initiator: string
@@ -41,11 +41,20 @@ interface TradeView {
   version: bigint
 }
 
-function defaultDeadlineInput() {
-  const date = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+function localInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0")
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
+
+function defaultDeadlineInput() {
+  return localInput(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000))
+}
+
+function maxDeadlineInput() {
+  return localInput(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000))
+}
+
+const MAX_TRADE_SECONDS = 30n * 24n * 60n * 60n
 
 function deadlineToUnix(value: string) {
   const ms = new Date(value).getTime()
@@ -130,6 +139,10 @@ export function TradeInterface() {
   const [trade, setTrade] = useState<TradeView | null>(null)
   const [bundle, setBundle] = useState<Map<string, ListedAsset[]>>(new Map())
   const [insides, setInsides] = useState<Map<string, BoxInside>>(new Map())
+  const [myFaces, setMyFaces] = useState<AssetFace[]>([])
+  const [theirFaces, setTheirFaces] = useState<AssetFace[]>([])
+  const [settleGas, setSettleGas] = useState<string | null>(null)
+  const [revokeNfts, setRevokeNfts] = useState<ListedAsset[]>([])
   const [bundleSource, setBundleSource] = useState<"storage" | "events" | null>(null)
   const [assetKind, setAssetKind] = useState<"ERC20" | "ERC721">("ERC721")
   const [assetAddress, setAssetAddress] = useState("")
@@ -199,6 +212,49 @@ export function TradeInterface() {
     const other = account.toLowerCase() === trade.initiator.toLowerCase() ? trade.counterparty : trade.initiator
     return assetsFor(bundle, other)
   }, [account, bundle, trade])
+
+  useEffect(() => {
+    const ethereum = window.ethereum
+    if (!ethereum) return
+    const provider = new BrowserProvider(ethereum as Eip1193Provider)
+    let stop = false
+    void Promise.all([labelAssets(provider, myAssets), labelAssets(provider, theirAssets)])
+      .then(([mine, theirs]) => {
+        if (!stop) {
+          setMyFaces(mine)
+          setTheirFaces(theirs)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      stop = true
+    }
+  }, [myAssets, theirAssets])
+
+  useEffect(() => {
+    if (!account || !trade || trade.executed || !isAddress(escrowAddress) || !tradeId.startsWith("0x")) {
+      setSettleGas(null)
+      return
+    }
+    const ethereum = window.ethereum
+    if (!ethereum) return
+    const provider = new BrowserProvider(ethereum as Eip1193Provider)
+    const escrow = new Contract(escrowAddress, ESCROW_ABI, provider)
+    const data = escrow.interface.encodeFunctionData("approveTrade", [tradeId, trade.version])
+    let stop = false
+    void (async () => {
+      try {
+        await provider.call({ to: escrowAddress, from: account, data })
+        const gas = await provider.estimateGas({ to: escrowAddress, from: account, data })
+        if (!stop) setSettleGas(gas.toString())
+      } catch {
+        if (!stop) setSettleGas(null)
+      }
+    })()
+    return () => {
+      stop = true
+    }
+  }, [account, escrowAddress, tradeId, trade?.executed, trade?.version])
 
   async function walletSigner() {
     const ethereum = window.ethereum
@@ -282,6 +338,10 @@ export function TradeInterface() {
       setStatus("Choose the day and time when the trade expires.")
       return
     }
+    if (deadline > BigInt(Math.floor(Date.now() / 1000)) + MAX_TRADE_SECONDS) {
+      setStatus("A trade can stay open for 30 days at most.")
+      return
+    }
     setBusy(true)
     setStatus(null)
     try {
@@ -331,10 +391,17 @@ export function TradeInterface() {
       const escrow = escrowContract(signer)
       if (kind === "ERC721") {
         const nft = new Contract(token, TEST_ERC721_ABI, signer)
-        const approved = await nft.isApprovedForAll(await signer.getAddress(), escrowAddress)
-        if (!approved) {
-          setStatus("Approve this NFT collection for Atomic Barter, then it can be listed.")
-          await (await nft.setApprovalForAll(escrowAddress, true)).wait()
+        const me = await signer.getAddress()
+        const approvedForAll = await nft.isApprovedForAll(me, escrowAddress)
+        let approvedForToken = ZeroAddress
+        try {
+          approvedForToken = await nft.getApproved(BigInt(id))
+        } catch {
+          approvedForToken = ZeroAddress
+        }
+        if (!approvedForAll && approvedForToken.toLowerCase() !== escrowAddress.toLowerCase()) {
+          setStatus("Approve this NFT for Atomic Barter, then it can be listed.")
+          await (await nft.approve(escrowAddress, BigInt(id))).wait()
         }
       } else {
         const erc20 = new Contract(token, TEST_ERC20_ABI, signer)
@@ -403,13 +470,34 @@ export function TradeInterface() {
 
   async function approve() {
     if (!trade) return
+    const mine = myAssets.filter((asset) => asset.assetType === 1)
     setBusy(true)
     setStatus(null)
     try {
-      const escrow = await signerContract()
+      const signer = await walletSigner()
+      const me = await signer.getAddress()
+      const escrow = escrowContract(signer)
+      const provider = signer.provider
+      if (!provider) throw new Error("The wallet has no provider.")
+      const data = escrow.interface.encodeFunctionData("approveTrade", [tradeId, trade.version])
+      await provider.call({ to: escrowAddress, from: me, data })
+      const gas = await provider.estimateGas({ to: escrowAddress, from: me, data })
+      setSettleGas(gas.toString())
+      setStatus(`This acceptance uses about ${gas.toString()} gas. Confirm it in the wallet. The second acceptance sends the assets.`)
       const tx = await escrow.approveTrade(tradeId, trade.version)
-      await tx.wait()
+      const receipt = await tx.wait()
+      const settled = receipt?.logs.some((entry: { topics: string[]; data: string }) => {
+        try {
+          return escrow.interface.parseLog(entry)?.name === "TradeCompleted"
+        } catch {
+          return false
+        }
+      })
+      if (settled) setRevokeNfts(mine)
       await refresh()
+      if (settled) {
+        setStatus("Trade settled. You can revoke the approval Atomic Barter still has on the NFTs you listed.")
+      }
     } catch (error) {
       setStatus(explain(error))
     } finally {
@@ -418,6 +506,7 @@ export function TradeInterface() {
   }
 
   async function cancel() {
+    const mine = myAssets.filter((asset) => asset.assetType === 1)
     setBusy(true)
     setStatus(null)
     try {
@@ -427,7 +516,38 @@ export function TradeInterface() {
       setTrade(null)
       setBundle(new Map())
       setBundleSource(null)
-      setStatus("Trade cancelled. The assets stay in the wallets that held them.")
+      setRevokeNfts(mine)
+      setStatus("Trade cancelled. The assets stay in the wallets that held them. You can revoke the approval on the NFTs you listed.")
+    } catch (error) {
+      setStatus(explain(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revokeApprovals() {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const signer = await walletSigner()
+      const me = await signer.getAddress()
+      for (const asset of revokeNfts) {
+        const nft = new Contract(asset.contractAddress, TEST_ERC721_ABI, signer)
+        let approved = ZeroAddress
+        try {
+          approved = await nft.getApproved(asset.tokenId)
+        } catch {
+          approved = ZeroAddress
+        }
+        if (approved.toLowerCase() === escrowAddress.toLowerCase()) {
+          await (await nft.approve(ZeroAddress, asset.tokenId)).wait()
+        }
+        if (await nft.isApprovedForAll(me, escrowAddress)) {
+          await (await nft.setApprovalForAll(escrowAddress, false)).wait()
+        }
+      }
+      setRevokeNfts([])
+      setStatus("Approvals revoked. Atomic Barter can no longer move those NFTs.")
     } catch (error) {
       setStatus(explain(error))
     } finally {
@@ -498,6 +618,7 @@ export function TradeInterface() {
             busy={busy}
             counterparty={counterparty}
             deadlineInput={deadlineInput}
+            deadlineMax={maxDeadlineInput()}
             escrowAddress={escrowAddress}
             tradeId={tradeId}
             onCounterparty={setCounterparty}
@@ -525,7 +646,10 @@ export function TradeInterface() {
             busy={busy}
             myAssets={myAssets}
             theirAssets={theirAssets}
+            myFaces={myFaces}
+            theirFaces={theirFaces}
             insides={insides}
+            settleGas={settleGas}
             dropOver={dropOver}
             onDragOver={(event) => {
               event.preventDefault()
@@ -565,6 +689,19 @@ export function TradeInterface() {
             onTrust={trustAsset}
             onAdd={addAsset}
           />
+          {revokeNfts.length > 0 && (
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-sm text-zinc-300">Atomic Barter may still be approved to move the NFTs from this trade.</p>
+              <button
+                type="button"
+                className="mt-3 rounded-lg border border-white/15 px-3 py-2 text-sm text-zinc-100 disabled:opacity-50"
+                disabled={busy}
+                onClick={() => void revokeApprovals()}
+              >
+                Revoke those approvals
+              </button>
+            </div>
+          )}
           {status && (
             <p className="rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-zinc-200">{status}</p>
           )}

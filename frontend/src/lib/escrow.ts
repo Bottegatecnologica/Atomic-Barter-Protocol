@@ -8,7 +8,7 @@ export const ESCROW_ABI = [
   "function approveTrade(bytes32 tradeId, uint256 bundleVersion)",
   "function cancelTrade(bytes32 tradeId)",
   "function getTrade(bytes32 tradeId) view returns (address initiator, address counterparty, bool initiatorApproved, bool counterpartyApproved, bool executed, uint256 initiatorAssetCount, uint256 counterpartyAssetCount, uint256 deadline, uint256 version)",
-  "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType)[])",
+  "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType, bool sealedContainer, uint256 sealState, bytes32 contentHash)[])",
   "event TradeCreated(bytes32 indexed tradeId, address indexed initiator, address indexed counterparty, uint256 deadline)",
   "event AssetAdded(bytes32 indexed tradeId, address indexed owner, address indexed contractAddress, uint8 assetType, uint256 tokenId, uint256 amount)",
   "event AssetRemoved(bytes32 indexed tradeId, address indexed owner, address indexed contractAddress, uint256 tokenId, uint256 amount)",
@@ -44,8 +44,11 @@ const ALLOWLIST_KEY = "atomic-barter.allowlist"
 const OLD_ASSETS = new Interface([
   "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType)[])",
 ])
-const NEW_ASSETS = new Interface([
+const SEAL_ASSETS = new Interface([
   "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType, bool sealedContainer, uint256 sealState)[])",
+])
+const HASH_ASSETS = new Interface([
+  "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType, bool sealedContainer, uint256 sealState, bytes32 contentHash)[])",
 ])
 
 export async function readStoredAssets(escrow: Contract, tradeId: string, party: string) {
@@ -58,9 +61,13 @@ export async function readStoredAssets(escrow: Contract, tradeId: string, party:
   if (!call) return escrow.getAssets.staticCall(tradeId, party)
   const raw = await call({ to, data })
   try {
-    return NEW_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+    return HASH_ASSETS.decodeFunctionResult("getAssets", raw)[0]
   } catch {
-    return OLD_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+    try {
+      return SEAL_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+    } catch {
+      return OLD_ASSETS.decodeFunctionResult("getAssets", raw)[0]
+    }
   }
 }
 

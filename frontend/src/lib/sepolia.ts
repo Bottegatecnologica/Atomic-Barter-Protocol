@@ -17,6 +17,8 @@ export const TEST_ERC20_ABI = [
 
 export const TEST_ERC721_ABI = [
   "function mint(address to, uint256 tokenId)",
+  "function approve(address to, uint256 tokenId)",
+  "function getApproved(uint256 tokenId) view returns (address)",
   "function setApprovalForAll(address operator, bool approved)",
   "function isApprovedForAll(address owner, address operator) view returns (bool)",
 ] as const

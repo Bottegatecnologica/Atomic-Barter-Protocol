@@ -1,20 +1,31 @@
 import type { DragEvent } from "react"
 import Button from "./ui/button"
-import { boxKey, isSchrodingerBox, type BoxInside } from "../lib/box"
+import { boxKey, type AssetFace, type BoxInside, type BoxNode } from "../lib/box"
 import type { ListedAsset } from "../lib/escrow"
 
-function shortAddress(address: string) {
-  return `${address.slice(0, 6)}…${address.slice(-4)}`
+function originLabel(chain: number) {
+  if (chain === 10002) return "Ethereum Sepolia"
+  if (chain === 10004) return "Base Sepolia"
+  return `Wormhole chain ${chain}`
 }
 
-function formatAsset(asset: ListedAsset) {
-  if (asset.assetType === 1 && isSchrodingerBox(asset.contractAddress)) {
-    return `Schrödinger's Box #${asset.tokenId.toString()}`
-  }
-  if (asset.assetType === 1) {
-    return `NFT ${shortAddress(asset.contractAddress)} #${asset.tokenId.toString()}`
-  }
-  return `${asset.amount.toString()} of token ${shortAddress(asset.contractAddress)}`
+function NodeList({ nodes }: { nodes: BoxNode[] }) {
+  return (
+    <ul className="mt-1 space-y-1 border-l border-white/10 pl-3">
+      {nodes.map((node, index) => (
+        <li key={index}>
+          <span className="text-xs text-zinc-300">
+            {node.shadow && (
+              <span className="mr-1 rounded bg-violet-400/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-100">Shadow</span>
+            )}
+            {node.text}
+          </span>
+          {node.origin && <p className="text-[11px] text-zinc-500">{node.origin}</p>}
+          {node.children.length > 0 && <NodeList nodes={node.children} />}
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 function Pill({ on, label }: { on: boolean; label: string }) {
@@ -29,6 +40,7 @@ function AssetColumn({
   title,
   hint,
   assets,
+  faces,
   insides,
   onRemove,
   drop,
@@ -36,6 +48,7 @@ function AssetColumn({
   title: string
   hint?: string
   assets: ListedAsset[]
+  faces?: AssetFace[]
   insides?: Map<string, BoxInside>
   onRemove?: (index: number) => void
   drop?: {
@@ -60,15 +73,20 @@ function AssetColumn({
         <ul className="mt-3 space-y-2">
           {assets.map((asset, index) => {
             const inside = insides?.get(boxKey(asset.contractAddress, asset.tokenId))
+            const face = faces?.[index]
             return (
               <li key={`${asset.contractAddress}-${asset.tokenId}-${asset.amount}-${index}`} className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.04] px-3 py-2">
                 <div className="min-w-0">
-                  <span className="font-mono text-xs text-zinc-200">{formatAsset(asset)}</span>
-                  {inside && (
-                    <p className={`mt-1 text-xs ${inside.changed ? "text-amber-200" : "text-zinc-400"}`}>
-                      {inside.lines.join(" · ")}
+                  <span className="font-mono text-xs text-zinc-200">{face?.primary ?? "Asset"}</span>
+                  {face && <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{face.address}</p>}
+                  {face?.warning && <p className="mt-1 text-xs text-amber-200">{face.warning}</p>}
+                  {inside?.shadow && (
+                    <p className="mt-1 text-xs text-violet-200">
+                      <span className="mr-1 rounded bg-violet-400/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-100">Shadow</span>
+                      Claim on #{inside.originBoxId} from {originLabel(inside.originChain)}. These addresses belong to that chain.
                     </p>
                   )}
+                  {inside && <NodeList nodes={inside.nodes} />}
                   {inside?.changed && (
                     <p className="mt-1 text-xs font-medium text-amber-200">The contents of this box changed after it was listed, or it is no longer sealed.</p>
                   )}
@@ -99,7 +117,10 @@ export function BundleBoard({
   busy,
   myAssets,
   theirAssets,
+  myFaces,
+  theirFaces,
   insides,
+  settleGas,
   dropOver,
   onDragOver,
   onDragLeave,
@@ -116,7 +137,10 @@ export function BundleBoard({
   busy: boolean
   myAssets: ListedAsset[]
   theirAssets: ListedAsset[]
+  myFaces: AssetFace[]
+  theirFaces: AssetFace[]
   insides: Map<string, BoxInside>
+  settleGas: string | null
   dropOver: boolean
   onDragOver: (event: DragEvent) => void
   onDragLeave: () => void
@@ -170,11 +194,12 @@ export function BundleBoard({
           title="You give"
           hint={trade && !trade.executed ? "Drop a test asset here." : undefined}
           assets={myAssets}
+          faces={myFaces}
           insides={insides}
           onRemove={onRemove}
           drop={trade && !trade.executed ? { active: dropOver, onDragOver, onDragLeave, onDrop } : undefined}
         />
-        <AssetColumn title="You receive" assets={theirAssets} insides={insides} />
+        <AssetColumn title="You receive" assets={theirAssets} faces={theirFaces} insides={insides} />
       </div>
 
       {contentChanged && (
@@ -188,6 +213,11 @@ export function BundleBoard({
           <Button disabled={busy || contentChanged} onClick={onApprove}>
             I accept version {trade.version.toString()}
           </Button>
+          {settleGas && (
+            <span className="self-center text-xs text-zinc-400">
+              A trial of this acceptance uses about {settleGas} gas. The second acceptance sends the assets.
+            </span>
+          )}
           <Button variant="outline" disabled={busy} onClick={onCancel}>
             Cancel trade
           </Button>

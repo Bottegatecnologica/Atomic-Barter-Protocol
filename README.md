@@ -70,7 +70,7 @@ The bugs this replaced, and how each one was exploited, are written up in [SECUR
 ### Trade lifecycle
 
 1. **Create** — Initiator calls `createTrade(counterparty, deadline)` and receives a unique `tradeId`.
-2. **Fund (off-chain approval)** — Each party adds assets via `addNFT` or `addERC20`. Tokens must be approved to the escrow. NFTs require `setApprovalForAll`; a one-token `approve` is not enough to list.
+2. **Fund (off-chain approval)** — Each party adds assets via `addNFT` or `addERC20`. Tokens must be approved to the escrow. An NFT can be approved for that token id, or for the whole collection.
 3. **Review** — Both parties inspect the full bundle on-chain (and in the UI), including the token contracts and the counterparty address. Read `version` from `getTrade`.
 4. **Approve** — Each party calls `approveTrade(tradeId, version)` with the version they reviewed. When the second approval of that same version arrives, `_executeTrade` runs automatically.
 5. **Complete or cancel** — On success, assets are swapped. Either party can call `cancelTrade` while the trade is open, including after the deadline.
@@ -226,7 +226,7 @@ Sepolia deployment. The test ERC-20 and test NFT have an open `mint`, so the fro
 
 | Network | Contract | Address | Explorer |
 |---------|----------|---------|----------|
-| Sepolia | TradeEscrow | `0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5` | [view](https://sepolia.etherscan.io/address/0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5) |
+| Sepolia | TradeEscrow | `0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b` | [view](https://sepolia.etherscan.io/address/0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b) |
 | Sepolia | Test ERC-20 | `0xf0977881b567A4bb4B10eF52f1D088B36E120b24` | [view](https://sepolia.etherscan.io/address/0xf0977881b567A4bb4B10eF52f1D088B36E120b24) |
 | Sepolia | Test NFT | `0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f` | [view](https://sepolia.etherscan.io/address/0x587D76448cC1304bdf2436e92A1cB1b369b8Ad8f) |
 

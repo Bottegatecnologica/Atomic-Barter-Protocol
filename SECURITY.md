@@ -20,6 +20,12 @@ Self-review of `contracts/TradeEscrow.sol`, written in the form of an audit repo
 | I-01 | OpenZeppelin v4 import path | Info | Fixed |
 | I-02 | Cancelling a trade left its asset arrays in storage | Info | Fixed |
 | O-01 | A listed box can be emptied before settlement | High | Fixed |
+| AB-01 | Nested box contents are neither shown nor bound | Medium | Fixed |
+| AB-02 | Truncated addresses and raw amounts allow token spoofing | Medium | Fixed |
+| AB-03 | `deadline` has no maximum | Low | Fixed |
+| AB-04 | `setApprovalForAll` stays active after a trade | Low | Fixed |
+| AB-05 | A shadow box is shown like an original | Low | Fixed |
+| AB-06 | The second approver pays all settlement gas | Info | Accepted risk |
 
 ## H-01 — `transferFrom` return value is ignored
 
@@ -141,6 +147,54 @@ Alice has to unseal to change the contents. That changes the counter. She then h
 
 The site shows the box contents and keeps Accept off when it can see that the seal no longer matches, or that a deposit or withdrawal landed after listing. That warning is not a substitute for the settlement check.
 
+## AB-01 — Nested box contents are neither shown nor bound
+
+**Severity:** Medium
+
+`readBoxInsides` used to read one level, and the escrow stored only the outer box's `sealState`. A nested box cannot change while it is inside (SchrodingerBox SB-11), but the counterparty was approving without seeing the inner holdings, and a change that kept the same seal counter was not bound.
+
+**Fix:** `ISealable.contentHash(uint256)` returns a hash of the asset list. For each NFT in that list that is this box, the hash includes the inner hash, up to four levels. An external `ISealable` is included with `staticcall`, or zero if that call fails. `addNFT` stores the hash. Settlement reverts with `ContentChanged` if it differs. The site reads the same tree, with a depth limit of four and a set that stops cycles.
+
+## AB-02 — Truncated addresses and raw amounts allow token spoofing
+
+**Severity:** Medium
+
+Unknown assets were shown as the first and last four hex characters, and amounts as raw integers. A vanity address with the same prefix and suffix as a known token is cheap to generate. The allowlist lives in `localStorage` and the user can add to it.
+
+**Fix:** each listed asset shows the full checksummed address, `symbol()` and `decimals()` read on-chain, and the amount in whole tokens. If the symbol matches PAR or a test token at a different address, the row says so.
+
+## AB-03 — `deadline` has no maximum
+
+**Severity:** Low
+
+`createTrade` used to accept any future timestamp, including `type(uint256).max`. An approval given today then never expired, which is what L-02 set out to prevent.
+
+**Fix:** `MAX_TRADE_DURATION` is 30 days. `createTrade` reverts with `InvalidDeadline` when the deadline is past `block.timestamp + MAX_TRADE_DURATION`. The site defaults to 7 days and will not offer a date past 30. `test/TradeEscrow.ts` covers the revert.
+
+## AB-04 — `setApprovalForAll` stays active after a trade
+
+**Severity:** Low
+
+Listing an NFT required approval for the whole collection, and nothing revoked it afterwards. The escrow is not upgradeable, so the exposure is limited to bugs in this code, but it covered every approved collection.
+
+**Fix:** `addNFT` accepts `isApprovedForAll` or `getApproved(tokenId) == address(this)`. The site approves the single token. After a trade settles or is cancelled, it offers to revoke that approval, and a collection approval if one is still set. `test/TradeEscrow.ts` lists an NFT with a single-token approval.
+
+## AB-05 — A shadow box is shown like an original
+
+**Severity:** Low
+
+A shadow's value depends on the return path. Its asset list holds origin-chain addresses. The site used to resolve those addresses as if they were on the connected chain, and it drew a shadow like any other box.
+
+**Fix:** a shadow is badged, with the origin chain and the original id. Assets inside a shadow are labeled as addresses on that origin chain. They are not read with the local `symbol()`.
+
+## AB-06 — The second approver pays all settlement gas
+
+**Severity:** Info (accepted risk)
+
+Up to 40 transfers plus the seal and content-hash checks, including any callbacks from hostile tokens. The second call to `approveTrade` is the one that moves the assets.
+
+**Mitigation:** before that call the site runs `eth_call` on `approveTrade` and shows `eth_estimateGas`. A reverting trial is shown as an error and the wallet is not asked to send it.
+
 ## Trust model
 
 There is no owner, no pause, and no upgrade. A bad version is replaced by deploying a new address. The two parties are the only accounts that can list, approve, or cancel. Settlement moves the assets they already approved, or it reverts.
@@ -150,6 +204,8 @@ There is no owner, no pause, and no upgrade. A bad version is replaced by deploy
 - A container NFT is safe inside a trade only if it implements `ISealable` and the holder seals it before listing. Containers that do not, including an ERC-6551 account that does not expose `sealState` (or the older `state()` shape this escrow does not read), can still be emptied by their owner.
 - Settlement uses ERC-721 `transferFrom`. That call does not ask the recipient to support ERC-721, so an NFT can be delivered to a contract that has no way to send it back.
 - The list of tokens the site treats as known is stored in `localStorage`. It applies only in that browser.
+- The seal check is safe for nested SchrodingerBoxes only because an inner box is owned by the box contract and cannot be operated. A container whose control does not follow `ownerOf` breaks that assumption.
+- Treat a shadow box as a claim that depends on the Wormhole return path, not as the assets themselves.
 
 ## Reporting a vulnerability
 
@@ -161,10 +217,10 @@ These are accepted properties of the current design, not open findings.
 
 - A token the user chose to list can still lie. If `balanceOf` increases by `amount` without a real economic transfer, or `ownerOf` reports the recipient after a no-op, the checks pass. The escrow cannot tell a dishonest token from a normal one. The site warns on contracts it does not know. The on-chain checks stop an honest fee, a `false` return, and a no-op that leaves balances unchanged.
 - Container NFTs that do not implement `ISealable` can still be emptied after they are listed. The escrow does not try to guess which NFTs are containers.
-- Listing an NFT requires `setApprovalForAll`. A one-token `approve` is not enough to list.
+- Listing an NFT accepts either `setApprovalForAll` or `approve` for that token id. The site uses the single-token approval and offers to revoke it after the trade settles or is cancelled. An approval that is left in place still lets this escrow move that token.
 - Settlement uses ERC-721 `transferFrom`. An NFT can be delivered to a contract that cannot send it back.
 - ETH is not an asset of this escrow. The contract does not receive ether and does not refund it, so there is no `address.transfer` path.
-- The Sepolia escrow the site uses is `0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5`, deployed 3 October 2026 from the source in this repository. It checks `ISealable` before listing and again after both sides have transferred. The explorer does not show that address as verified yet. The previous escrow `0x11dFdDDF9393F01d73c85c50245f5A979209B656` does not include the seal check.
+- The Sepolia escrow the site uses is `0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b`, deployed 4 October 2026 from the source in this repository. It checks `ISealable` seal state and `contentHash` before listing and again at settlement, and it rejects a deadline more than 30 days out. The explorer does not show that address as verified yet: this environment has no Etherscan API key.
 
 ## Tests
 
@@ -184,5 +240,9 @@ These are accepted properties of the current design, not open findings.
 | Bridged box rolls the trade back | `test/TradeEscrow.ts` |
 | Real SchrodingerBox settles while sealed, and a burned shadow reverts the trade | `test/TradeEscrow.ts` |
 | A shadow can be listed because it is always sealed | `test/TradeEscrow.ts` |
+| Deadline past 30 days reverts | `test/TradeEscrow.ts` |
+| A single-token approval is enough to list an NFT | `test/TradeEscrow.ts` |
+| Self-deposit reverts with SelfDeposit | `test/SchrodingerBox.audit-poc.test.ts` |
+| Inner box cannot be touched while nested | `test/SchrodingerBox.audit-poc.test.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |

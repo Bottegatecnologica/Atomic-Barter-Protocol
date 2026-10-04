@@ -6,6 +6,7 @@ export function TradeForms({
   busy,
   counterparty,
   deadlineInput,
+  deadlineMax,
   escrowAddress,
   tradeId,
   onCounterparty,
@@ -19,6 +20,7 @@ export function TradeForms({
   busy: boolean
   counterparty: string
   deadlineInput: string
+  deadlineMax: string
   escrowAddress: string
   tradeId: string
   onCounterparty: (value: string) => void
@@ -44,11 +46,12 @@ export function TradeForms({
               placeholder="0x…"
             />
           </Field>
-          <Field label="Expires" hint="After this time you can only cancel.">
+          <Field label="Expires" hint="Seven days is the default. Thirty days is the longest.">
             <input
               className={fieldClass}
               type="datetime-local"
               value={deadlineInput}
+              max={deadlineMax}
               onChange={(event) => onDeadline(event.target.value)}
             />
           </Field>

@@ -198,6 +198,11 @@ contract MockSealable is ERC721, ISealable {
         return _state[tokenId];
     }
 
+    function contentHash(uint256 tokenId) public view returns (bytes32) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return keccak256(abi.encode(tokenId, _state[tokenId]));
+    }
+
     function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
         return interfaceId == type(ISealable).interfaceId || super.supportsInterface(interfaceId);
     }
