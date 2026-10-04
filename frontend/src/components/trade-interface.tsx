@@ -18,6 +18,7 @@ import {
   type ListedAsset,
 } from "../lib/escrow"
 import {
+  PREVIOUS_ESCROWS,
   SEPOLIA_CHAIN_ID,
   SEPOLIA_ESCROW,
   SEPOLIA_TEST_ERC20,
@@ -29,7 +30,7 @@ import {
   isSepoliaTestAsset,
 } from "../lib/sepolia"
 import { loadShelf, loadTrades, type KnownTrade, type Shelf } from "../lib/shelf"
-import { boxKey, isSchrodingerBox, labelAssets, readBoxInsides, type AssetFace, type BoxInside } from "../lib/box"
+import { BOXES_BY_CHAIN, PREVIOUS_SEPOLIA_BOXES, boxKey, isSchrodingerBox, labelAssets, readBoxInsides, type AssetFace, type BoxInside } from "../lib/box"
 
 interface TradeView {
   initiator: string
@@ -143,6 +144,7 @@ export function TradeInterface() {
   const [theirFaces, setTheirFaces] = useState<AssetFace[]>([])
   const [settleGas, setSettleGas] = useState<string | null>(null)
   const [revokeNfts, setRevokeNfts] = useState<ListedAsset[]>([])
+  const [staleApprovals, setStaleApprovals] = useState<Array<{ collection: string; escrow: string }>>([])
   const [bundleSource, setBundleSource] = useState<"storage" | "events" | null>(null)
   const [assetKind, setAssetKind] = useState<"ERC20" | "ERC721">("ERC721")
   const [assetAddress, setAssetAddress] = useState("")
@@ -161,6 +163,38 @@ export function TradeInterface() {
   useEffect(() => {
     setAllowlist(loadAllowlist())
   }, [])
+
+  useEffect(() => {
+    if (!account || chainId !== SEPOLIA_CHAIN_ID || !window.ethereum) {
+      setStaleApprovals([])
+      return
+    }
+    const ethereum = window.ethereum
+    const provider = new BrowserProvider(ethereum as Eip1193Provider)
+    const collections = [
+      SEPOLIA_TEST_ERC721,
+      ...(BOXES_BY_CHAIN[SEPOLIA_CHAIN_ID] ?? []),
+      ...PREVIOUS_SEPOLIA_BOXES,
+    ].filter((item) => isAddress(item))
+    let stop = false
+    void (async () => {
+      const found: Array<{ collection: string; escrow: string }> = []
+      await Promise.all(collections.map(async (collection) => {
+        const nft = new Contract(collection, TEST_ERC721_ABI, provider)
+        await Promise.all(PREVIOUS_ESCROWS.map(async (escrow) => {
+          try {
+            if (await nft.isApprovedForAll(account, escrow)) found.push({ collection, escrow })
+          } catch {
+            // A contract without this method is not an approval we can revoke from here.
+          }
+        }))
+      }))
+      if (!stop) setStaleApprovals(found)
+    })()
+    return () => {
+      stop = true
+    }
+  }, [account, chainId])
 
   useEffect(() => {
     setAcknowledged(false)
@@ -218,7 +252,11 @@ export function TradeInterface() {
     if (!ethereum) return
     const provider = new BrowserProvider(ethereum as Eip1193Provider)
     let stop = false
-    void Promise.all([labelAssets(provider, myAssets), labelAssets(provider, theirAssets)])
+    const networkId = chainId ?? SEPOLIA_CHAIN_ID
+    void Promise.all([
+      labelAssets(provider, myAssets, networkId),
+      labelAssets(provider, theirAssets, networkId),
+    ])
       .then(([mine, theirs]) => {
         if (!stop) {
           setMyFaces(mine)
@@ -229,7 +267,7 @@ export function TradeInterface() {
     return () => {
       stop = true
     }
-  }, [myAssets, theirAssets])
+  }, [myAssets, theirAssets, chainId])
 
   useEffect(() => {
     if (!account || !trade || trade.executed || !isAddress(escrowAddress) || !tradeId.startsWith("0x")) {
@@ -317,7 +355,7 @@ export function TradeInterface() {
     setBundleSource(view.executed ? "events" : "storage")
     const flat = [...lists.values()].flat()
     const listedAt = await listingBlocks(escrow, id)
-    setInsides(await readBoxInsides(provider, flat, listedAt))
+    setInsides(await readBoxInsides(provider, flat, listedAt, chainId ?? SEPOLIA_CHAIN_ID))
   }
 
   useEffect(() => {
@@ -379,7 +417,7 @@ export function TradeInterface() {
       setStatus("The token address is not valid. It must start with 0x.")
       return
     }
-    const known = isSepoliaTestAsset(token) || isSchrodingerBox(token) || isAllowlisted(token, allowlist)
+    const known = isSepoliaTestAsset(token) || isSchrodingerBox(token, chainId ?? SEPOLIA_CHAIN_ID) || isAllowlisted(token, allowlist)
     if (!known && !acknowledged) {
       setStatus("This token is not one you have already accepted. Tick the confirmation, or remember it on this computer.")
       return
@@ -518,6 +556,26 @@ export function TradeInterface() {
       setBundleSource(null)
       setRevokeNfts(mine)
       setStatus("Trade cancelled. The assets stay in the wallets that held them. You can revoke the approval on the NFTs you listed.")
+    } catch (error) {
+      setStatus(explain(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revokeStaleApprovals() {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const signer = await walletSigner()
+      for (const item of staleApprovals) {
+        const nft = new Contract(item.collection, TEST_ERC721_ABI, signer)
+        if (await nft.isApprovedForAll(await signer.getAddress(), item.escrow)) {
+          await (await nft.setApprovalForAll(item.escrow, false)).wait()
+        }
+      }
+      setStaleApprovals([])
+      setStatus("Approvals on the older Atomic Barter contracts are revoked.")
     } catch (error) {
       setStatus(explain(error))
     } finally {
@@ -689,6 +747,21 @@ export function TradeInterface() {
             onTrust={trustAsset}
             onAdd={addAsset}
           />
+          {staleApprovals.length > 0 && (
+            <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4">
+              <p className="text-sm text-amber-50">
+                This wallet still approves an older Atomic Barter contract for a whole collection. Those contracts do not enforce the current seal rules.
+              </p>
+              <button
+                type="button"
+                className="mt-3 rounded-lg border border-white/15 px-3 py-2 text-sm text-zinc-100 disabled:opacity-50"
+                disabled={busy}
+                onClick={() => void revokeStaleApprovals()}
+              >
+                Revoke the old approvals
+              </button>
+            </div>
+          )}
           {revokeNfts.length > 0 && (
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-sm text-zinc-300">Atomic Barter may still be approved to move the NFTs from this trade.</p>

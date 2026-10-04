@@ -10,7 +10,7 @@ export const ESCROW_ABI = [
   "function getTrade(bytes32 tradeId) view returns (address initiator, address counterparty, bool initiatorApproved, bool counterpartyApproved, bool executed, uint256 initiatorAssetCount, uint256 counterpartyAssetCount, uint256 deadline, uint256 version)",
   "function getAssets(bytes32 tradeId, address party) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType, bool sealedContainer, uint256 sealState, bytes32 contentHash)[])",
   "event TradeCreated(bytes32 indexed tradeId, address indexed initiator, address indexed counterparty, uint256 deadline)",
-  "event AssetAdded(bytes32 indexed tradeId, address indexed owner, address indexed contractAddress, uint8 assetType, uint256 tokenId, uint256 amount)",
+  "event AssetAdded(bytes32 indexed tradeId, address indexed owner, address indexed contractAddress, uint8 assetType, uint256 tokenId, uint256 amount, uint256 sealState, bytes32 contentHash)",
   "event AssetRemoved(bytes32 indexed tradeId, address indexed owner, address indexed contractAddress, uint256 tokenId, uint256 amount)",
   "event TradeApproved(bytes32 indexed tradeId, address indexed party, uint256 bundleVersion)",
   "event TradeCompleted(bytes32 indexed tradeId)",

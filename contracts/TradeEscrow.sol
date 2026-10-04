@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ISealable} from "./ISealable.sol";
+import {ILegacySealable} from "./legacy/ILegacySealable.sol";
 
 /// @title TradeEscrow
 /// @notice Two-party atomic swaps of ERC-20 and ERC-721 bundles.
@@ -23,6 +24,9 @@ contract TradeEscrow is ReentrancyGuard {
 
     /// @dev An approval cannot stay valid forever. Thirty days is the longest open trade.
     uint256 public constant MAX_TRADE_DURATION = 30 days;
+
+    /// @dev A hostile container cannot spend the caller's whole gas stipend.
+    uint256 private constant SEAL_CALL_GAS = 50_000;
 
     enum AssetType {
         ERC20,
@@ -64,7 +68,9 @@ contract TradeEscrow is ReentrancyGuard {
         address indexed contractAddress,
         uint8 assetType,
         uint256 tokenId,
-        uint256 amount
+        uint256 amount,
+        uint256 sealState,
+        bytes32 contentHash
     );
     event AssetRemoved(
         bytes32 indexed tradeId,
@@ -99,6 +105,7 @@ contract TradeEscrow is ReentrancyGuard {
     error FeeOnTransferNotSupported();
     error ContainerNotSealed();
     error ContentChanged();
+    error LegacyContainer();
 
     function getTrade(bytes32 tradeId)
         external
@@ -180,7 +187,7 @@ contract TradeEscrow is ReentrancyGuard {
         }));
 
         _bumpBundle(trade);
-        emit AssetAdded(tradeId, msg.sender, nftContract, uint8(AssetType.ERC721), tokenId, 1);
+        emit AssetAdded(tradeId, msg.sender, nftContract, uint8(AssetType.ERC721), tokenId, 1, sealState, contentHash);
     }
 
     function addERC20(bytes32 tradeId, address tokenContract, uint256 amount) external nonReentrant {
@@ -207,7 +214,7 @@ contract TradeEscrow is ReentrancyGuard {
         }));
 
         _bumpBundle(trade);
-        emit AssetAdded(tradeId, msg.sender, tokenContract, uint8(AssetType.ERC20), 0, amount);
+        emit AssetAdded(tradeId, msg.sender, tokenContract, uint8(AssetType.ERC20), 0, amount, 0, bytes32(0));
     }
 
     /// @notice Removes one of the caller's listed assets. Uses swap-and-pop, so
@@ -321,10 +328,12 @@ contract TradeEscrow is ReentrancyGuard {
 
     function _checkSeal(Asset storage asset) internal view {
         if (!asset.sealedContainer) return;
-        ISealable container = ISealable(asset.contractAddress);
-        if (!container.isSealed(asset.tokenId)) revert ContainerNotSealed();
-        if (container.sealState(asset.tokenId) != asset.sealState) revert ContentChanged();
-        if (container.contentHash(asset.tokenId) != asset.contentHash) revert ContentChanged();
+        address container = asset.contractAddress;
+        if (!_staticBool(container, abi.encodeCall(ISealable.isSealed, (asset.tokenId)))) revert ContainerNotSealed();
+        (bool stateOk, uint256 state) = _staticUint(container, abi.encodeCall(ISealable.sealState, (asset.tokenId)));
+        if (!stateOk || state != asset.sealState) revert ContentChanged();
+        (bool hashOk, bytes32 hash) = _staticBytes32(container, abi.encodeCall(ISealable.contentHash, (asset.tokenId)));
+        if (!hashOk || hash != asset.contentHash) revert ContentChanged();
     }
 
     function _recheckSeals(Asset[] storage items) internal view {
@@ -338,15 +347,40 @@ contract TradeEscrow is ReentrancyGuard {
     }
 
     /// @dev `staticcall` so an NFT with no ERC-165 still lists. A container that
-    ///      reports `ISealable` must already be sealed, and its counter is stored.
+    ///      reports the current `ISealable` must already be sealed. One that reports
+    ///      only the older id, from before `contentHash`, is rejected.
     function _readSeal(address nftContract, uint256 tokenId) internal view returns (bool sealedContainer, uint256 state, bytes32 hash) {
-        (bool ok, bytes memory ret) = nftContract.staticcall(
-            abi.encodeCall(IERC165.supportsInterface, (type(ISealable).interfaceId))
-        );
-        if (!ok || ret.length != 32 || !abi.decode(ret, (bool))) return (false, 0, bytes32(0));
-        ISealable container = ISealable(nftContract);
-        if (!container.isSealed(tokenId)) revert ContainerNotSealed();
-        return (true, container.sealState(tokenId), container.contentHash(tokenId));
+        bool current = _staticBool(nftContract, abi.encodeCall(IERC165.supportsInterface, (type(ISealable).interfaceId)));
+        bool legacy = _staticBool(nftContract, abi.encodeCall(IERC165.supportsInterface, (type(ILegacySealable).interfaceId)));
+        if (legacy && !current) revert LegacyContainer();
+        if (!current) return (false, 0, bytes32(0));
+        if (!_staticBool(nftContract, abi.encodeCall(ISealable.isSealed, (tokenId)))) revert ContainerNotSealed();
+        bool stateOk;
+        (stateOk, state) = _staticUint(nftContract, abi.encodeCall(ISealable.sealState, (tokenId)));
+        if (!stateOk) revert ContentChanged();
+        bool hashOk;
+        (hashOk, hash) = _staticBytes32(nftContract, abi.encodeCall(ISealable.contentHash, (tokenId)));
+        if (!hashOk) revert ContentChanged();
+        return (true, state, hash);
+    }
+
+    function _staticBool(address target, bytes memory data) internal view returns (bool) {
+        (bool ok, bytes memory ret) = target.staticcall{gas: SEAL_CALL_GAS}(data);
+        return ok && ret.length >= 32 && abi.decode(ret, (bool));
+    }
+
+    function _staticUint(address target, bytes memory data) internal view returns (bool ok, uint256 value) {
+        bytes memory ret;
+        (ok, ret) = target.staticcall{gas: SEAL_CALL_GAS}(data);
+        if (!ok || ret.length < 32) return (false, 0);
+        return (true, abi.decode(ret, (uint256)));
+    }
+
+    function _staticBytes32(address target, bytes memory data) internal view returns (bool ok, bytes32 value) {
+        bytes memory ret;
+        (ok, ret) = target.staticcall{gas: SEAL_CALL_GAS}(data);
+        if (!ok || ret.length < 32) return (false, bytes32(0));
+        return (true, abi.decode(ret, (bytes32)));
     }
 
     function _requireParticipant(bytes32 tradeId) internal view returns (Trade storage trade) {

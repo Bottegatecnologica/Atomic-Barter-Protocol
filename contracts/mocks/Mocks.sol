@@ -208,6 +208,50 @@ contract MockSealable is ERC721, ISealable {
     }
 }
 
+/// @notice Seal counter stays put while `contentHash` can still move.
+contract HashDriftSealable is ERC721, ISealable {
+    mapping(uint256 => bool) private _sealed;
+    mapping(uint256 => uint256) private _state;
+    mapping(uint256 => bytes32) private _extra;
+
+    constructor() ERC721("Drift", "DRFT") {}
+
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
+    }
+
+    function seal(uint256 tokenId) external {
+        require(ownerOf(tokenId) == msg.sender, "owner");
+        require(!_sealed[tokenId], "sealed");
+        _sealed[tokenId] = true;
+        _state[tokenId] += 1;
+    }
+
+    function drift(uint256 tokenId, bytes32 extra) external {
+        require(ownerOf(tokenId) == msg.sender, "owner");
+        _extra[tokenId] = extra;
+    }
+
+    function isSealed(uint256 tokenId) public view returns (bool) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return _sealed[tokenId];
+    }
+
+    function sealState(uint256 tokenId) public view returns (uint256) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return _state[tokenId];
+    }
+
+    function contentHash(uint256 tokenId) public view returns (bytes32) {
+        require(_ownerOf(tokenId) != address(0), "missing");
+        return keccak256(abi.encode(tokenId, _state[tokenId], _extra[tokenId]));
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
+        return interfaceId == type(ISealable).interfaceId || super.supportsInterface(interfaceId);
+    }
+}
+
 /// @notice Tells a contract recipient that the token arrived, even though the escrow uses `transferFrom`.
 contract ArrivalERC721 is ERC721 {
     constructor() ERC721("Arrival", "ARR") {}

@@ -5,6 +5,13 @@ export const SEPOLIA_ESCROW = addresses.escrow
 export const SEPOLIA_TEST_ERC20 = addresses.testErc20
 export const SEPOLIA_TEST_ERC721 = addresses.testErc721
 
+/** Escrows that no longer enforce the current seal rules. Revoke approvals left on them. */
+export const PREVIOUS_ESCROWS = [
+  "0x11dFdDDF9393F01d73c85c50245f5A979209B656",
+  "0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5",
+  "0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b",
+]
+
 const SEPOLIA_HEX = "0xaa36a7"
 
 export const TEST_ERC20_MINT = 1000n * 10n ** 18n

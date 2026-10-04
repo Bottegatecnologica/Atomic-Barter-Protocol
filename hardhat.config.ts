@@ -51,9 +51,19 @@ const config: HardhatUserConfig = {
           evmVersion: "cancun",
         },
       },
+      "contracts/legacy/LegacySchrodingerBox.sol": {
+        version: "0.8.24",
+        settings: {
+          optimizer: { enabled: true, runs: 200 },
+          evmVersion: "cancun",
+        },
+      },
     },
   },
   networks: {
+    hardhat: {
+      allowUnlimitedContractSize: true,
+    },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
       accounts: privateKey ? [privateKey] : [],

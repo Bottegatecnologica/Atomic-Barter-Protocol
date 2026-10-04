@@ -161,7 +161,7 @@ The site shows the box contents and keeps Accept off when it can see that the se
 
 Unknown assets were shown as the first and last four hex characters, and amounts as raw integers. A vanity address with the same prefix and suffix as a known token is cheap to generate. The allowlist lives in `localStorage` and the user can add to it.
 
-**Fix:** each listed asset shows the full checksummed address, `symbol()` and `decimals()` read on-chain, and the amount in whole tokens. If the symbol matches PAR or a test token at a different address, the row says so.
+**Fix:** each listed asset shows the full checksummed address, `symbol()` and `decimals()` read on-chain, and the amount in whole tokens. If the symbol matches PAR, SBOX, or a test token at a different address, the row says so. The live box addresses are stored per chain, so the Base box address is not treated as a box while the wallet is on Sepolia.
 
 ## AB-03 — `deadline` has no maximum
 
@@ -195,6 +195,34 @@ Up to 40 transfers plus the seal and content-hash checks, including any callback
 
 **Mitigation:** before that call the site runs `eth_call` on `approveTrade` and shows `eth_estimateGas`. A reverting trial is shown as an error and the wallet is not asked to send it.
 
+## N-01 — A box from before `contentHash` lists as a plain NFT
+
+**Severity:** Medium
+
+Adding `contentHash` to `ISealable` changed its interface id. Boxes deployed before that change answer only the older id (`isSealed` ⊕ `sealState`). The escrow used to treat that as an ordinary NFT, so a sealed box could be emptied after the other side had approved.
+
+**Fix:** `addNFT` reverts with `LegacyContainer` when the contract supports the older id and not the current one. `ISealable` does not gain further functions; a later field belongs on a new interface. The site treats `SBOX` as a known symbol only at the live box addresses. `test/TradeEscrow.legacy-box.poc.ts` covers the revert.
+
+## N-02 — Older escrows stay approved
+
+**Severity:** Low
+
+Escrows already on Sepolia have no owner and cannot be upgraded. An `setApprovalForAll` given to one of them stays until the wallet revokes it.
+
+**Fix:** the site checks that approval on the test NFT and on the known boxes, and offers the revocation. The addresses are listed under Previous deployments.
+
+## N-03 — `AssetAdded` did not record the seal
+
+**Severity:** Info
+
+**Fix:** `AssetAdded` now includes `sealState` and `contentHash`.
+
+## N-04 — An external container can spend the settlement gas
+
+**Severity:** Low
+
+**Fix:** every seal read in the escrow, and both external hash reads in the box, is a `staticcall` capped at 50,000 gas. A call that does not finish fails closed in the escrow and contributes a zero hash inside a box.
+
 ## Trust model
 
 There is no owner, no pause, and no upgrade. A bad version is replaced by deploying a new address. The two parties are the only accounts that can list, approve, or cancel. Settlement moves the assets they already approved, or it reverts.
@@ -220,7 +248,17 @@ These are accepted properties of the current design, not open findings.
 - Listing an NFT accepts either `setApprovalForAll` or `approve` for that token id. The site uses the single-token approval and offers to revoke it after the trade settles or is cancelled. An approval that is left in place still lets this escrow move that token.
 - Settlement uses ERC-721 `transferFrom`. An NFT can be delivered to a contract that cannot send it back.
 - ETH is not an asset of this escrow. The contract does not receive ether and does not refund it, so there is no `address.transfer` path.
-- The Sepolia escrow the site uses is `0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b`, deployed 4 October 2026 from the source in this repository. It checks `ISealable` seal state and `contentHash` before listing and again at settlement, and it rejects a deadline more than 30 days out. The explorer does not show that address as verified yet: this environment has no Etherscan API key.
+- The Sepolia escrow the site uses is `0xFc58343cb7458b4eF8a6D41E532BD49386d04189`, deployed from the source in this repository. It rejects a legacy seal interface, checks `ISealable` seal state and `contentHash` with a 50,000 gas cap, and it rejects a deadline more than 30 days out. The explorer does not show that address as verified yet: this environment has no Etherscan API key.
+
+## Previous deployments
+
+These contracts are still on Sepolia. Revoke any collection approval given to an escrow in this list.
+
+| Contract | Address | What it lacks |
+|----------|---------|----------------|
+| TradeEscrow | `0x11dFdDDF9393F01d73c85c50245f5A979209B656` | No seal check. |
+| TradeEscrow | `0xcEC6Ed6B834e0dF429A12F6a30fa0Dec14a9b5D5` | No `contentHash`, no 30-day deadline cap. |
+| TradeEscrow | `0x6819ec835bE28B16Bd63AfBB52C8955FA0AC650b` | No `LegacyContainer` reject, no gas cap, `AssetAdded` omits the seal. |
 
 ## Tests
 
@@ -243,6 +281,8 @@ These are accepted properties of the current design, not open findings.
 | Deadline past 30 days reverts | `test/TradeEscrow.ts` |
 | A single-token approval is enough to list an NFT | `test/TradeEscrow.ts` |
 | Self-deposit reverts with SelfDeposit | `test/SchrodingerBox.audit-poc.test.ts` |
+| A pre-contentHash box reverts with LegacyContainer | `test/TradeEscrow.legacy-box.poc.ts` |
+| Content hash change with a stable seal counter reverts | `test/TradeEscrow.ts` |
 | Inner box cannot be touched while nested | `test/SchrodingerBox.audit-poc.test.ts` |
 | Fuzz: exact amounts, or a `false` return moves nothing | `test/TradeEscrow.t.sol` |
 | Invariant: token balances stay with the two parties and the escrow holds none | `test/TradeEscrow.t.sol` |

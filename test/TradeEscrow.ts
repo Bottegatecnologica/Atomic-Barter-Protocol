@@ -522,6 +522,29 @@ describe("TradeEscrow", function () {
       expect(await sealable.ownerOf(9)).to.equal(bob.address);
       expect(await nft.ownerOf(2)).to.equal(alice.address);
     });
+
+    it("reverts when the content hash changes and the seal counter does not", async function () {
+      const { escrow, nft, alice, bob } = await loadFixture(deployFixture);
+      const box = await (await hre.ethers.getContractFactory("HashDriftSealable")).deploy();
+      await box.mint(alice.address, 3);
+      await box.connect(alice).seal(3);
+      await box.connect(alice).approve(await escrow.getAddress(), 3);
+      await nft.connect(bob).setApprovalForAll(await escrow.getAddress(), true);
+      const tradeId = await readTradeId(
+        escrow,
+        await escrow.connect(alice).createTrade(bob.address, await openDeadline())
+      );
+      await escrow.connect(alice).addNFT(tradeId, await box.getAddress(), 3);
+      await escrow.connect(bob).addNFT(tradeId, await nft.getAddress(), 2);
+      const version = await bundleVersion(escrow, tradeId);
+      await escrow.connect(bob).approveTrade(tradeId, version);
+      const before = await box.sealState(3);
+      await box.connect(alice).drift(3, hre.ethers.id("moved"));
+      expect(await box.sealState(3)).to.equal(before);
+      await expect(escrow.connect(alice).approveTrade(tradeId, version))
+        .to.be.revertedWithCustomError(escrow, "ContentChanged");
+      expect(await box.ownerOf(3)).to.equal(alice.address);
+    });
   });
 
   describe("real SchrodingerBox", function () {
@@ -610,7 +633,7 @@ describe("TradeEscrow", function () {
       await box.connect(alice).returnShadowBox(1, alice.address);
 
       await expect(escrow.connect(alice).approveTrade(tradeId, version))
-        .to.be.revertedWithCustomError(box, "ERC721NonexistentToken");
+        .to.be.revertedWithCustomError(escrow, "ContainerNotSealed");
       expect(await nft.ownerOf(2)).to.equal(bob.address);
       await expect(box.ownerOf(1)).to.be.revertedWithCustomError(box, "ERC721NonexistentToken");
     });

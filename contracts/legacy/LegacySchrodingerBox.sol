@@ -7,11 +7,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-/// @dev Copy of the box repository's SchrodingerBox. The import path is the only edit.
-import {ISealable} from "../ISealable.sol";
+import {ILegacySealable as ISealable} from "./ILegacySealable.sol";
 
 /**
  * @notice Interface for Wormhole Relayer
@@ -50,7 +47,7 @@ interface IERC4906 {
     event BatchMetadataUpdate(uint256 _fromTokenId, uint256 _toTokenId);
 }
 
-contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWormholeReceiver, ISealable, IERC4906 {
+contract LegacySchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormholeReceiver, ISealable, IERC4906 {
     using SafeERC20 for IERC20;
 
     /// @dev Caps each kind so a deposit loop cannot be grown without bound.
@@ -148,7 +145,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     error AlreadySealed();
     error NotSealed();
     error NonceMismatch();
-    error SelfDeposit();
 
     constructor(
         address _wormholeRelayer,
@@ -236,12 +232,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     function sealState(uint256 tokenId) public view returns (uint256) {
         _requireOwned(tokenId);
         return _seals[tokenId].state;
-    }
-
-    /// @inheritdoc ISealable
-    function contentHash(uint256 tokenId) public view returns (bytes32) {
-        _requireOwned(tokenId);
-        return _contentHash(tokenId, 0);
     }
 
     function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
@@ -340,7 +330,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         _requireOpenOriginal(boxId);
         if (_seals[boxId].closed) revert BoxSealed();
         if (nftContract == address(0)) revert InvalidAddress();
-        if (nftContract == address(this) && tokenId == boxId) revert SelfDeposit();
         Asset[] storage assets = boxes[boxId].assets;
         uint256 nfts = 0;
         for (uint256 i = 0; i < assets.length; i++) {
@@ -430,7 +419,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         
         bytes32 targetContract = trustedContracts[targetChain];
         if (targetContract == bytes32(0)) revert InvalidTargetChain();
-        if (receiver == address(uint160(uint256(targetContract)))) revert InvalidAddress();
 
         bytes32 messageNonce = generateMessageNonce(boxId);
         boxes[boxId].messageNonce = messageNonce;
@@ -474,16 +462,14 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         }
     }
 
-    /// @notice Burns a shadow box and asks the origin chain to unlock the original for `receiver`.
-    function returnShadowBox(uint256 boxId, address receiver) external payable nonReentrant {
+    /// @notice Burns a shadow box and asks the origin chain to unlock the original.
+    function returnShadowBox(uint256 boxId) external payable nonReentrant {
         if (ownerOf(boxId) != msg.sender) revert NotBoxOwner();
         if (boxes[boxId].isOriginal) revert NotShadowBox();
-        if (receiver == address(0)) revert InvalidAddress();
         
         uint16 targetChain = boxes[boxId].originChain;
         bytes32 targetContract = trustedContracts[targetChain];
         if (targetContract == bytes32(0)) revert InvalidTargetChain();
-        if (receiver == address(uint160(uint256(targetContract)))) revert InvalidAddress();
 
         uint256 originBoxId = boxes[boxId].originBoxId;
         if (originBoxId == 0) revert NotShadowBox();
@@ -495,7 +481,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             uint8(2), // action: 2 = return
             originBoxId,
             boxes[boxId],
-            receiver,
+            msg.sender,
             messageNonce
         );
 
@@ -600,8 +586,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     }
 
     /// @dev Caller owns an original box that is not locked in a bridge.
-    ///      A box nested inside this contract is owned by this contract, so no
-    ///      wallet can deposit, withdraw, seal, or unseal it until it is withdrawn.
     function _requireOpenOriginal(uint256 boxId) internal view {
         if (ownerOf(boxId) != msg.sender) revert NotBoxOwner();
         if (!boxes[boxId].isOriginal) revert NotOriginalBox();
@@ -662,42 +646,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             }
         }
         return false;
-    }
-
-    function _contentHash(uint256 tokenId, uint256 depth) internal view returns (bytes32) {
-        if (depth >= 4) return bytes32(0);
-        Asset[] storage assets = boxes[tokenId].assets;
-        bytes32[] memory parts = new bytes32[](assets.length);
-        for (uint256 i = 0; i < assets.length; i++) {
-            bytes32 child;
-            if (assets[i].assetType == ASSET_ERC721) {
-                if (assets[i].contractAddress == address(this)) {
-                    child = _contentHash(assets[i].tokenId, depth + 1);
-                } else {
-                    child = _externalContentHash(assets[i].contractAddress, assets[i].tokenId);
-                }
-            }
-            parts[i] = keccak256(abi.encode(
-                assets[i].contractAddress,
-                assets[i].tokenId,
-                assets[i].amount,
-                assets[i].assetType,
-                child
-            ));
-        }
-        return keccak256(abi.encode(chainId, tokenId, parts));
-    }
-
-    function _externalContentHash(address nft, uint256 tokenId) internal view returns (bytes32) {
-        (bool supported, bytes memory data) = nft.staticcall{gas: 50_000}(
-            abi.encodeCall(IERC165.supportsInterface, (type(ISealable).interfaceId))
-        );
-        if (!supported || data.length < 32 || !abi.decode(data, (bool))) return bytes32(0);
-        (bool hashed, bytes memory hashData) = nft.staticcall{gas: 50_000}(
-            abi.encodeCall(ISealable.contentHash, (tokenId))
-        );
-        if (!hashed || hashData.length < 32) return bytes32(0);
-        return abi.decode(hashData, (bytes32));
     }
 
     function _removeAsset(Asset[] storage assets, uint256 index) internal {

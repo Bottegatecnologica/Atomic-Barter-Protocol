@@ -1,12 +1,19 @@
 import { Contract, formatUnits, getAddress, isAddress, type Provider } from "ethers"
 import type { ListedAsset } from "./escrow"
-import { SEPOLIA_TEST_ERC20, SEPOLIA_TEST_ERC721 } from "./sepolia"
+import { SEPOLIA_CHAIN_ID, SEPOLIA_TEST_ERC20, SEPOLIA_TEST_ERC721 } from "./sepolia"
 
-/** The peered deployment of 4 October 2026. */
-export const BOXES: string[] = [
+/** Sepolia boxes from earlier deploys. They are not the live pair. */
+export const PREVIOUS_SEPOLIA_BOXES = [
+  "0x29733d284ba67EC96D43966C575f26437aF0aF73",
+  "0x4642836001Ab04ebDf65f1780F5FB5E297e33990",
   "0x352167e7A42C69401F705005d179d18892D115F2",
-  "0xcd2fD8153B15b37dE54B10eD522F3a25cB9b56a3",
 ]
+
+/** Current peered boxes, keyed by the chain the wallet is on. */
+export const BOXES_BY_CHAIN: Record<number, string[]> = {
+  11155111: ["0xe8De9D30ae05f176b5970559ad961958A5447831"],
+  84532: ["0x53C3fAa5029a7FfD23DaAA737C8E6524992fe9Ee"],
+}
 
 const PAR = new Set([
   "0xc3bcabf7dc96220f11ebdd895811448bc029c8b6",
@@ -65,8 +72,8 @@ export interface AssetFace {
   warning?: string
 }
 
-export function isSchrodingerBox(address: string) {
-  return BOXES.some((item) => item.toLowerCase() === address.toLowerCase())
+export function isSchrodingerBox(address: string, chainId = SEPOLIA_CHAIN_ID) {
+  return (BOXES_BY_CHAIN[chainId] ?? []).some((item) => item.toLowerCase() === address.toLowerCase())
 }
 
 export function boxKey(contractAddress: string, tokenId: bigint) {
@@ -111,6 +118,9 @@ async function loadKnownSymbols(provider: Provider) {
     found.set(key, set)
   }
   for (const address of PAR) remember("PAR", address)
+  for (const list of Object.values(BOXES_BY_CHAIN)) {
+    for (const address of list) remember("SBOX", address)
+  }
   for (const address of [SEPOLIA_TEST_ERC20, SEPOLIA_TEST_ERC721]) {
     if (!address || !isAddress(address)) continue
     remember(await readSymbol(provider, address), address)
@@ -126,7 +136,7 @@ function spoofWarning(symbol: string, address: string, known: Map<string, Set<st
   return `The symbol ${symbol} matches a known token, but this address is different.`
 }
 
-async function plainText(provider: Provider, asset: { contractAddress: string; tokenId: bigint; amount: bigint; assetType: number | bigint }, known: Map<string, Set<string>>) {
+async function plainText(provider: Provider, asset: { contractAddress: string; tokenId: bigint; amount: bigint; assetType: number | bigint }, known: Map<string, Set<string>>, chainId: number) {
   const address = checksum(asset.contractAddress)
   if (Number(asset.assetType) === 0) {
     if (PAR.has(asset.contractAddress.toLowerCase())) return `PAR ${amountText(asset.amount, 18)}`
@@ -142,7 +152,7 @@ async function plainText(provider: Provider, asset: { contractAddress: string; t
   }
   const id = asset.tokenId.toString()
   if (CATS.has(asset.contractAddress.toLowerCase())) return `Cat #${id}`
-  if (isSchrodingerBox(asset.contractAddress)) return `Box #${id}`
+  if (isSchrodingerBox(asset.contractAddress, chainId)) return `Box #${id}`
   const symbol = await readSymbol(provider, asset.contractAddress)
   return symbol ? `${symbol} #${id}` : `NFT ${address} #${id}`
 }
@@ -154,6 +164,7 @@ async function readNodes(
   depth: number,
   seen: Set<string>,
   known: Map<string, Set<string>>,
+  chainId: number,
 ): Promise<{ nodes: BoxNode[]; shadow: boolean; originChain: number; originBoxId: string; locked: boolean }> {
   const key = boxKey(boxAddress, tokenId)
   const empty = { nodes: [] as BoxNode[], shadow: false, originChain: 0, originBoxId: "0", locked: false }
@@ -180,9 +191,9 @@ async function readNodes(
       })
       continue
     }
-    if (Number(asset.assetType) === 1 && isSchrodingerBox(asset.contractAddress)) {
+    if (Number(asset.assetType) === 1 && isSchrodingerBox(asset.contractAddress, chainId)) {
       try {
-        const inner = await readNodes(provider, asset.contractAddress, asset.tokenId, depth + 1, seen, known)
+        const inner = await readNodes(provider, asset.contractAddress, asset.tokenId, depth + 1, seen, known, chainId)
         nodes.push({
           text: `Box #${asset.tokenId.toString()}`,
           shadow: inner.shadow,
@@ -195,7 +206,7 @@ async function readNodes(
       continue
     }
     nodes.push({
-      text: await plainText(provider, asset, known),
+      text: await plainText(provider, asset, known, chainId),
       shadow: false,
       origin: "",
       children: [],
@@ -211,11 +222,11 @@ async function readNodes(
   }
 }
 
-export async function labelAssets(provider: Provider, assets: ListedAsset[]): Promise<AssetFace[]> {
+export async function labelAssets(provider: Provider, assets: ListedAsset[], chainId = SEPOLIA_CHAIN_ID): Promise<AssetFace[]> {
   const known = await loadKnownSymbols(provider)
   return Promise.all(assets.map(async (asset) => {
     const address = checksum(asset.contractAddress)
-    if (asset.assetType === 1 && isSchrodingerBox(asset.contractAddress)) {
+    if (asset.assetType === 1 && isSchrodingerBox(asset.contractAddress, chainId)) {
       return { primary: `Schrödinger's Box #${asset.tokenId.toString()}`, address }
     }
     if (asset.assetType === 1) {
@@ -245,15 +256,16 @@ export async function readBoxInsides(
   provider: Provider,
   assets: ListedAsset[],
   listedAt: Map<string, number>,
+  chainId = SEPOLIA_CHAIN_ID,
 ): Promise<Map<string, BoxInside>> {
   const found = new Map<string, BoxInside>()
   const known = await loadKnownSymbols(provider)
-  const boxes = assets.filter((asset) => asset.assetType === 1 && isSchrodingerBox(asset.contractAddress))
+  const boxes = assets.filter((asset) => asset.assetType === 1 && isSchrodingerBox(asset.contractAddress, chainId))
   await Promise.all(boxes.map(async (asset) => {
     const key = boxKey(asset.contractAddress, asset.tokenId)
     const contract = new Contract(asset.contractAddress, BOX_ABI, provider)
     try {
-      const tree = await readNodes(provider, asset.contractAddress, asset.tokenId, 0, new Set(), known)
+      const tree = await readNodes(provider, asset.contractAddress, asset.tokenId, 0, new Set(), known, chainId)
       let changed = false
       if (asset.sealedContainer) {
         try {

@@ -10,6 +10,8 @@ pragma solidity ^0.8.24;
 ///      so the inner box cannot be sealed, unsealed, deposited into, or
 ///      withdrawn from while it sits inside. The seal of an outer box is
 ///      therefore recursive only for containers whose control follows `ownerOf`.
+///      This interface id is published. A later field belongs on a new interface,
+///      not on this one. `contentHash` is already part of the published id.
 interface ISealable {
     /// @notice Whether `tokenId` is sealed. A shadow box is always sealed.
     function isSealed(uint256 tokenId) external view returns (bool);
