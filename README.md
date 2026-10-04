@@ -49,7 +49,7 @@ The project is split into two layers:
 - An approval names the bundle version the caller reviewed. Editing the bundle increments that version, so a transaction already in the mempool cannot settle the new offer.
 - Each trade has a deadline. After it, the bundle can no longer change or be approved. Either party can still cancel.
 
-The bugs this replaced, and how each one was exploited, are written up in [SECURITY.md](SECURITY.md).
+The bugs this replaced, and how each one was exploited, are written up in [SECURITY.md](SECURITY.md). What the box still needs before mainnet is in the box repository's [ROADMAP.md](https://github.com/Schrodinger-s-DAO/Wormhole-schrodinger-box/blob/main/ROADMAP.md).
 
 ---
 

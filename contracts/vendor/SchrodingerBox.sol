@@ -165,6 +165,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     error SelfDeposit();
     error ExternalHashFailed();
     error TooManyExternalSeals();
+    error ExternalTooDeep();
 
     constructor(
         address _wormholeRelayer,
@@ -467,14 +468,18 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
 
         bytes32 messageNonce = generateMessageNonce(boxId);
         boxes[boxId].messageNonce = messageNonce;
-        
-        // Prepare message for the target
+
+        // The destination stores this word and does not call the assets. Those
+        // contracts are not on the destination chain, and a failed call there
+        // would leave this original locked.
+        bytes32 hash = contentHash(boxId);
         bytes memory payload = abi.encode(
             uint8(1), // action: 1 = bridge
             boxId,
             boxes[boxId],
             receiver,
-            messageNonce
+            messageNonce,
+            hash
         );
 
         // Send message with Wormhole - improved error handling
@@ -529,7 +534,8 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             originBoxId,
             boxes[boxId],
             receiver,
-            messageNonce
+            messageNonce,
+            contentHash(boxId)
         );
 
         // Send message with Wormhole - improved error handling
@@ -572,9 +578,9 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
         bytes32 expectedSourceAddress = trustedContracts[sourceChain];
         if (expectedSourceAddress != sourceAddress) revert UntrustedSource();
 
-        (uint8 action, uint256 boxId, Box memory boxData, address receiver, bytes32 messageNonce) = abi.decode(
+        (uint8 action, uint256 boxId, Box memory boxData, address receiver, bytes32 messageNonce, bytes32 deliveredHash) = abi.decode(
             payload,
-            (uint8, uint256, Box, address, bytes32)
+            (uint8, uint256, Box, address, bytes32, bytes32)
         );
 
         if (processedMessages[messageNonce]) revert MessageAlreadyProcessed();
@@ -597,8 +603,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             for (uint256 i = 0; i < boxData.assets.length; i++) {
                 shadow.assets.push(boxData.assets[i]);
             }
-            _seals[localId].contentHash = _contentHash(localId, 0);
-            _recordExternalSeals(localId, localId, 0);
+            _seals[localId].contentHash = deliveredHash;
             // `_mint`, not `_safeMint`. A contract receiver with no `onERC721Received`
             // must not revert delivery, or the original stays locked with no exit.
             _mint(receiver, localId);
@@ -707,7 +712,10 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
     /// @dev Writes the external containers whose hash must stay live. Nested boxes of this
     ///      contract are walked, not recorded: holding them freezes their own list.
     function _recordExternalSeals(uint256 rootId, uint256 tokenId, uint256 depth) internal {
-        if (depth >= 4) return;
+        if (depth >= 4) {
+            _revertIfExternalSealable(tokenId);
+            return;
+        }
         Asset[] storage assets = boxes[tokenId].assets;
         uint256 length = assets.length;
         for (uint256 i = 0; i < length; i++) {
@@ -746,6 +754,17 @@ contract SchrodingerBox is ERC721Enumerable, Ownable2Step, ReentrancyGuard, IWor
             ));
         }
         return keccak256(abi.encode(chainId, tokenId, parts));
+    }
+
+    /// @dev An external container past the fourth level used to hash as zero. Sealing stops instead.
+    function _revertIfExternalSealable(uint256 tokenId) internal view {
+        Asset[] storage assets = boxes[tokenId].assets;
+        uint256 length = assets.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (assets[i].assetType != ASSET_ERC721) continue;
+            address nft = assets[i].contractAddress;
+            if (nft != address(this) && _reportsSealable(nft)) revert ExternalTooDeep();
+        }
     }
 
     function _reportsSealable(address nft) internal view returns (bool) {

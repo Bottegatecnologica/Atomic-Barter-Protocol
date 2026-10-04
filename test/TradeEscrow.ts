@@ -614,8 +614,8 @@ describe("TradeEscrow", function () {
     it("reverts settlement after the shadow is burned", async function () {
       const { escrow, nft, box, relayer, alice, bob, remote } = await realBox();
       const payload = hre.ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint8", "uint256", "tuple(tuple(address,uint256,uint256,uint8)[],bool,uint16,bool,uint256,bytes32,uint256)", "address", "bytes32"],
-        [1, 7, [[], false, DEST_CHAIN, true, 0, hre.ethers.ZeroHash, 0], alice.address, hre.ethers.id("shadow")]
+        ["uint8", "uint256", "tuple(tuple(address,uint256,uint256,uint8)[],bool,uint16,bool,uint256,bytes32,uint256)", "address", "bytes32", "bytes32"],
+        [1, 7, [[], false, DEST_CHAIN, true, 0, hre.ethers.ZeroHash, 0], alice.address, hre.ethers.id("shadow"), hre.ethers.ZeroHash]
       );
       await relayer.deliverPayload(await box.getAddress(), payload, DEST_CHAIN, remote);
       expect(await box.isSealed(1)).to.equal(true);
