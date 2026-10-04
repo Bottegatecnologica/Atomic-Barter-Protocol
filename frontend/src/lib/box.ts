@@ -2,6 +2,7 @@ import { Contract, formatUnits, type Provider } from "ethers"
 import type { ListedAsset } from "./escrow"
 
 const BOXES = [
+  "0x29733d284ba67EC96D43966C575f26437aF0aF73",
   "0x4642836001Ab04ebDf65f1780F5FB5E297e33990",
   "0xbC727Eda544c08395A59A4b5e5865375b955be12",
 ]
@@ -17,7 +18,7 @@ const CATS = new Set([
 ])
 
 const BOX_ABI = [
-  "function getBoxDetails(uint256 boxId) view returns (address[] erc20Tokens, uint256[] erc20Amounts, address[] erc721Contracts, uint256[] erc721TokenIds, bool isLocked, uint16 originChain, bool isOriginal, uint256 originBoxId)",
+  "function getBoxDetails(uint256 boxId) view returns (tuple(address contractAddress, uint256 tokenId, uint256 amount, uint8 assetType)[] assets, bool isLocked, uint16 originChain, bool isOriginal, uint256 originBoxId)",
   "function isSealed(uint256 tokenId) view returns (bool)",
   "function sealState(uint256 tokenId) view returns (uint256)",
   "event ERC20Deposited(uint256 indexed boxId, address indexed token, uint256 amount)",
@@ -52,22 +53,22 @@ function amountText(value: bigint) {
 }
 
 function describe(details: {
-  erc20Tokens: string[]
-  erc20Amounts: bigint[]
-  erc721Contracts: string[]
-  erc721TokenIds: bigint[]
+  assets: Array<{ contractAddress: string; tokenId: bigint; amount: bigint; assetType: number | bigint }>
   isLocked: boolean
 }) {
-  const lines = details.erc20Tokens.map((token, index) => {
-    const amount = details.erc20Amounts[index]
-    const name = PAR.has(token.toLowerCase()) ? "PAR" : short(token)
-    const shown = PAR.has(token.toLowerCase()) ? amountText(amount) : amount.toString()
-    return `${name} ${shown}`
-  })
-  details.erc721Contracts.forEach((token, index) => {
-    const id = details.erc721TokenIds[index].toString()
-    lines.push(CATS.has(token.toLowerCase()) ? `Cat #${id}` : `${short(token)} #${id}`)
-  })
+  const lines: string[] = []
+  for (const asset of details.assets) {
+    if (Number(asset.assetType) === 0) {
+      const token = asset.contractAddress
+      const name = PAR.has(token.toLowerCase()) ? "PAR" : short(token)
+      const shown = PAR.has(token.toLowerCase()) ? amountText(asset.amount) : asset.amount.toString()
+      lines.push(`${name} ${shown}`)
+    } else {
+      const id = asset.tokenId.toString()
+      const token = asset.contractAddress
+      lines.push(CATS.has(token.toLowerCase()) ? `Cat #${id}` : `${short(token)} #${id}`)
+    }
+  }
   if (lines.length === 0) lines.push("Empty")
   if (details.isLocked) lines.unshift("Locked")
   return lines

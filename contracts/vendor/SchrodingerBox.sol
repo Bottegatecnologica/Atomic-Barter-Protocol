@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 /// @dev Copy of the box repository's SchrodingerBox. The import path is the only edit.
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "../ISealable.sol";
+import {ISealable} from "../ISealable.sol";
 
 /**
  * @notice Interface for Wormhole Relayer
@@ -50,14 +51,20 @@ interface IERC4906 {
 contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormholeReceiver, ISealable, IERC4906 {
     using SafeERC20 for IERC20;
 
-    /// @dev Caps each box so a deposit loop cannot be grown without bound.
+    /// @dev Caps each kind so a deposit loop cannot be grown without bound.
     uint256 public constant MAX_ASSETS = 20;
+    uint8 public constant ASSET_ERC20 = 0;
+    uint8 public constant ASSET_ERC721 = 1;
+
+    struct Asset {
+        address contractAddress;
+        uint256 tokenId;
+        uint256 amount;
+        uint8 assetType; // 0 ERC20, 1 ERC721
+    }
 
     struct Box {
-        address[] erc20Tokens;
-        uint256[] erc20Amounts;
-        address[] erc721Contracts;
-        uint256[] erc721TokenIds;
+        Asset[] assets;
         bool isLocked;
         uint16 originChain;
         bool isOriginal;
@@ -128,7 +135,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
     error InvalidAddress();
     error NotWormholeRelayer();
     error MessageAlreadyProcessed();
-    error ArrayLengthMismatch();
     error BridgeFailed(string reason);
     error ZeroAmount();
     error TooManyAssets();
@@ -244,19 +250,14 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         }
 
         uint256 boxId = _nextTokenId();
-        
-        boxes[boxId] = Box({
-            erc20Tokens: new address[](0),
-            erc20Amounts: new uint256[](0),
-            erc721Contracts: new address[](0),
-            erc721TokenIds: new uint256[](0),
-            isLocked: false,
-            originChain: chainId,
-            isOriginal: true,
-            creationTime: block.timestamp,
-            messageNonce: bytes32(0),
-            originBoxId: boxId
-        });
+
+        Box storage created = boxes[boxId];
+        created.isLocked = false;
+        created.originChain = chainId;
+        created.isOriginal = true;
+        created.creationTime = block.timestamp;
+        created.messageNonce = bytes32(0);
+        created.originBoxId = boxId;
 
         _safeMint(msg.sender, boxId);
         _refundExcess(mintingFee);
@@ -281,19 +282,20 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
 
         uint256 received = _pullERC20(token, amount);
 
-        address[] storage tokens = boxes[boxId].erc20Tokens;
-        uint256[] storage amounts = boxes[boxId].erc20Amounts;
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i] == token) {
-                amounts[i] += received;
+        Asset[] storage assets = boxes[boxId].assets;
+        uint256 erc20s = 0;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType != ASSET_ERC20) continue;
+            erc20s++;
+            if (assets[i].contractAddress == token) {
+                assets[i].amount += received;
                 emit ERC20Deposited(boxId, token, received);
                 return;
             }
         }
 
-        if (tokens.length >= MAX_ASSETS) revert TooManyAssets();
-        tokens.push(token);
-        amounts.push(received);
+        if (erc20s >= MAX_ASSETS) revert TooManyAssets();
+        assets.push(Asset({contractAddress: token, tokenId: 0, amount: received, assetType: ASSET_ERC20}));
         emit ERC20Deposited(boxId, token, received);
     }
 
@@ -305,16 +307,11 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         _requireOpenOriginal(boxId);
         if (_seals[boxId].closed) revert BoxSealed();
 
-        for (uint i = 0; i < boxes[boxId].erc20Tokens.length; i++) {
-            if (boxes[boxId].erc20Tokens[i] == token) {
-                uint256 amount = boxes[boxId].erc20Amounts[i];
-                
-                // Remove token from arrays using last element swap method
-                boxes[boxId].erc20Tokens[i] = boxes[boxId].erc20Tokens[boxes[boxId].erc20Tokens.length - 1];
-                boxes[boxId].erc20Amounts[i] = boxes[boxId].erc20Amounts[boxes[boxId].erc20Amounts.length - 1];
-                
-                boxes[boxId].erc20Tokens.pop();
-                boxes[boxId].erc20Amounts.pop();
+        Asset[] storage assets = boxes[boxId].assets;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType == ASSET_ERC20 && assets[i].contractAddress == token) {
+                uint256 amount = assets[i].amount;
+                _removeAsset(assets, i);
 
                 IERC20(token).safeTransfer(msg.sender, amount);
                 emit ERC20Withdrawn(boxId, token, amount);
@@ -334,20 +331,22 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         _requireOpenOriginal(boxId);
         if (_seals[boxId].closed) revert BoxSealed();
         if (nftContract == address(0)) revert InvalidAddress();
-        if (boxes[boxId].erc721Contracts.length >= MAX_ASSETS) revert TooManyAssets();
-
-        for (uint256 i = 0; i < boxes[boxId].erc721Contracts.length; i++) {
-            if (boxes[boxId].erc721Contracts[i] == nftContract && boxes[boxId].erc721TokenIds[i] == tokenId) {
+        Asset[] storage assets = boxes[boxId].assets;
+        uint256 nfts = 0;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType != ASSET_ERC721) continue;
+            nfts++;
+            if (assets[i].contractAddress == nftContract && assets[i].tokenId == tokenId) {
                 revert DuplicateAsset();
             }
         }
+        if (nfts >= MAX_ASSETS) revert TooManyAssets();
 
         IERC721 nft = IERC721(nftContract);
         nft.transferFrom(msg.sender, address(this), tokenId);
         if (nft.ownerOf(tokenId) != address(this)) revert AssetNotReceived();
 
-        boxes[boxId].erc721Contracts.push(nftContract);
-        boxes[boxId].erc721TokenIds.push(tokenId);
+        assets.push(Asset({contractAddress: nftContract, tokenId: tokenId, amount: 0, assetType: ASSET_ERC721}));
 
         emit NFTDeposited(boxId, nftContract, tokenId);
     }
@@ -361,16 +360,10 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         _requireOpenOriginal(boxId);
         if (_seals[boxId].closed) revert BoxSealed();
 
-        for (uint i = 0; i < boxes[boxId].erc721Contracts.length; i++) {
-            if (boxes[boxId].erc721Contracts[i] == nftContract && 
-                boxes[boxId].erc721TokenIds[i] == tokenId) {
-                
-                // Remove NFT from arrays using last element swap method
-                boxes[boxId].erc721Contracts[i] = boxes[boxId].erc721Contracts[boxes[boxId].erc721Contracts.length - 1];
-                boxes[boxId].erc721TokenIds[i] = boxes[boxId].erc721TokenIds[boxes[boxId].erc721TokenIds.length - 1];
-                
-                boxes[boxId].erc721Contracts.pop();
-                boxes[boxId].erc721TokenIds.pop();
+        Asset[] storage assets = boxes[boxId].assets;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType == ASSET_ERC721 && assets[i].contractAddress == nftContract && assets[i].tokenId == tokenId) {
+                _removeAsset(assets, i);
 
                 IERC721(nftContract).transferFrom(address(this), msg.sender, tokenId);
                 emit NFTWithdrawn(boxId, nftContract, tokenId);
@@ -428,9 +421,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         bytes32 targetContract = trustedContracts[targetChain];
         if (targetContract == bytes32(0)) revert InvalidTargetChain();
 
-        if (boxes[boxId].erc20Tokens.length != boxes[boxId].erc20Amounts.length) revert ArrayLengthMismatch();
-        if (boxes[boxId].erc721Contracts.length != boxes[boxId].erc721TokenIds.length) revert ArrayLengthMismatch();
-
         bytes32 messageNonce = generateMessageNonce(boxId);
         boxes[boxId].messageNonce = messageNonce;
         
@@ -444,7 +434,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         );
 
         // Send message with Wormhole - improved error handling
-        uint256 assetCount = boxes[boxId].erc20Tokens.length + boxes[boxId].erc721Contracts.length;
+        uint256 assetCount = boxes[boxId].assets.length;
         uint256 wormholeFee = getWormholeFee(targetChain, assetCount);
         if (msg.value < wormholeFee) revert InsufficientWormholeFee();
 
@@ -482,9 +472,6 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         bytes32 targetContract = trustedContracts[targetChain];
         if (targetContract == bytes32(0)) revert InvalidTargetChain();
 
-        if (boxes[boxId].erc20Tokens.length != boxes[boxId].erc20Amounts.length) revert ArrayLengthMismatch();
-        if (boxes[boxId].erc721Contracts.length != boxes[boxId].erc721TokenIds.length) revert ArrayLengthMismatch();
-
         uint256 originBoxId = boxes[boxId].originBoxId;
         if (originBoxId == 0) revert NotShadowBox();
 
@@ -500,7 +487,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         );
 
         // Send message with Wormhole - improved error handling
-        uint256 assetCount = boxes[boxId].erc20Tokens.length + boxes[boxId].erc721Contracts.length;
+        uint256 assetCount = boxes[boxId].assets.length;
         uint256 wormholeFee = getWormholeFee(targetChain, assetCount);
         if (msg.value < wormholeFee) revert InsufficientWormholeFee();
 
@@ -547,19 +534,23 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
         if (processedMessages[messageNonce]) revert MessageAlreadyProcessed();
         processedMessages[messageNonce] = true;
 
-        if (boxData.erc20Tokens.length != boxData.erc20Amounts.length) revert ArrayLengthMismatch();
-        if (boxData.erc721Contracts.length != boxData.erc721TokenIds.length) revert ArrayLengthMismatch();
-        if (boxData.erc20Tokens.length > MAX_ASSETS || boxData.erc721Contracts.length > MAX_ASSETS) revert TooManyAssets();
+        (uint256 erc20s, uint256 nfts) = _countKinds(boxData);
+        if (erc20s > MAX_ASSETS || nfts > MAX_ASSETS) revert TooManyAssets();
         if (receiver == address(0)) revert InvalidAddress();
 
         if (action == 1) {
             // A shadow gets a fresh local id. Reusing `boxId` collides with a box this chain already minted.
             uint256 localId = _nextTokenId();
-            boxData.isOriginal = false;
-            boxData.isLocked = false;
-            boxData.originBoxId = boxId;
-            boxData.messageNonce = messageNonce;
-            boxes[localId] = boxData;
+            Box storage shadow = boxes[localId];
+            shadow.isOriginal = false;
+            shadow.isLocked = false;
+            shadow.originChain = boxData.originChain;
+            shadow.creationTime = boxData.creationTime;
+            shadow.messageNonce = messageNonce;
+            shadow.originBoxId = boxId;
+            for (uint256 i = 0; i < boxData.assets.length; i++) {
+                shadow.assets.push(boxData.assets[i]);
+            }
             // `_mint`, not `_safeMint`. A contract receiver with no `onERC721Received`
             // must not revert delivery, or the original stays locked with no exit.
             _mint(receiver, localId);
@@ -620,10 +611,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
 
     /// @notice Returns the assets and bridge state stored for a box.
     function getBoxDetails(uint256 boxId) external view returns (
-        address[] memory erc20Tokens,
-        uint256[] memory erc20Amounts,
-        address[] memory erc721Contracts,
-        uint256[] memory erc721TokenIds,
+        Asset[] memory assets,
         bool isLocked,
         uint16 originChain,
         bool isOriginal,
@@ -631,10 +619,7 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
     ) {
         Box storage box = boxes[boxId];
         return (
-            box.erc20Tokens,
-            box.erc20Amounts,
-            box.erc721Contracts,
-            box.erc721TokenIds,
+            box.assets,
             box.isLocked,
             box.originChain,
             box.isOriginal,
@@ -644,10 +629,10 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
 
     /// @notice Returns the recorded balance of one ERC-20 inside a box.
     function getERC20Balance(uint256 boxId, address token) external view returns (uint256 amount) {
-        Box storage box = boxes[boxId];
-        for (uint i = 0; i < box.erc20Tokens.length; i++) {
-            if (box.erc20Tokens[i] == token) {
-                return box.erc20Amounts[i];
+        Asset[] storage assets = boxes[boxId].assets;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType == ASSET_ERC20 && assets[i].contractAddress == token) {
+                return assets[i].amount;
             }
         }
         return 0;
@@ -655,12 +640,27 @@ contract SchrodingerBox is ERC721Enumerable, Ownable, ReentrancyGuard, IWormhole
 
     /// @notice Returns whether a box currently lists an NFT.
     function containsNFT(uint256 boxId, address nftContract, uint256 tokenId) external view returns (bool exists) {
-        Box storage box = boxes[boxId];
-        for (uint i = 0; i < box.erc721Contracts.length; i++) {
-            if (box.erc721Contracts[i] == nftContract && box.erc721TokenIds[i] == tokenId) {
+        Asset[] storage assets = boxes[boxId].assets;
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i].assetType == ASSET_ERC721 && assets[i].contractAddress == nftContract && assets[i].tokenId == tokenId) {
                 return true;
             }
         }
         return false;
+    }
+
+    function _removeAsset(Asset[] storage assets, uint256 index) internal {
+        assets[index] = assets[assets.length - 1];
+        assets.pop();
+    }
+
+    /// @dev Counts the two kinds in a decoded box. Any other type is rejected.
+    function _countKinds(Box memory boxData) internal pure returns (uint256 erc20s, uint256 nfts) {
+        for (uint256 i = 0; i < boxData.assets.length; i++) {
+            uint8 kind = boxData.assets[i].assetType;
+            if (kind == ASSET_ERC20) erc20s++;
+            else if (kind == ASSET_ERC721) nfts++;
+            else revert UnknownAction();
+        }
     }
 }
